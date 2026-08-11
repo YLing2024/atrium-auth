@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const Redis = require('ioredis');
 const { createTotpAuth } = require('../lib/totp-auth');
+const { base32Encode } = require('../lib/totp-auth/lib/totp');
 const { RateLimiter } = require('totp-auth/lib/rate-limit');
 
 const PORT = Number(process.env.PORT || 3200);
@@ -69,7 +70,108 @@ function clientIp(req) {
   return req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
 }
 
-// POST /api/totp/setup | /reset —— 复用 auth.router（首次设置引导 / 重置），限速/TOTP 逻辑不变
+/* ============ TOTP 两阶段重置（reset 生成 pending → confirm 验证转正） ============ */
+
+// pending 存储文件：{secret, expiresAt: now + 5min}。不覆盖正式 secret，
+// 正式 secret 在 confirm 成功前保持有效（旧验证码仍可登录）
+const PENDING_FILE = path.join(__dirname, '..', 'totp-pending.json');
+const PENDING_TTL_MS = 300 * 1000; // 5 分钟
+
+function loadPending() {
+  if (!fs.existsSync(PENDING_FILE)) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8'));
+    if (!data || typeof data.secret !== 'string' || typeof data.expiresAt !== 'number') return null;
+    if (Date.now() > data.expiresAt) {
+      try {
+        fs.unlinkSync(PENDING_FILE);
+      } catch (e) {
+        /* 忽略清理失败 */
+      }
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function savePending(secret) {
+  fs.mkdirSync(path.dirname(PENDING_FILE), { recursive: true });
+  const tmp = `${PENDING_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ secret, expiresAt: Date.now() + PENDING_TTL_MS }, null, 2));
+  fs.renameSync(tmp, PENDING_FILE);
+}
+
+function deletePending() {
+  try {
+    fs.unlinkSync(PENDING_FILE);
+  } catch (e) {
+    /* 无 pending 文件属正常 */
+  }
+}
+
+// 原子写正式 secret（与模块 saveSecret 同款实现）
+function saveFormalSecret(base32Secret) {
+  fs.mkdirSync(path.dirname(SECRET_FILE), { recursive: true });
+  const tmp = `${SECRET_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ secret: base32Secret }, null, 2));
+  fs.renameSync(tmp, SECRET_FILE);
+}
+
+// 复用 /api/verify 的 Redis 会话校验：header/query token → Redis GET 存在即通过，滑动续期
+async function requireSession(req) {
+  const token = tokenFrom(req);
+  if (!token) return null;
+  if (!redisAvailable()) return null;
+  try {
+    const user = await redis.get(token);
+    if (!user) return null;
+    await redis.expire(token, SESSION_TTL);
+    return user;
+  } catch (err) {
+    console.error(`[auth-server] session check error: ${err.message}`);
+    return null;
+  }
+}
+
+function otpauthUriFor(secret) {
+  const label = encodeURIComponent(ISSUER);
+  return `otpauth://totp/${label}:${label}?secret=${secret}&issuer=${label}&period=30&digits=6&algorithm=SHA1`;
+}
+
+// POST /api/totp/reset —— 需登录；生成新 secret 存 pending，不覆盖正式 secret（旧码仍可登录）
+app.post('/api/totp/reset', async (req, res) => {
+  const user = await requireSession(req);
+  if (!user) {
+    return res.status(401).json({ code: 'unauthorized', message: '未登录或会话已过期' });
+  }
+  const secret = base32Encode(crypto.randomBytes(20));
+  savePending(secret);
+  return res.json({ secret, otpauthUri: otpauthUriFor(secret), expiresIn: 300 });
+});
+
+// POST /api/totp/confirm —— 需登录；pending 验证码通过（±1 步）→ 转正写正式 secret 并删 pending
+app.post('/api/totp/confirm', async (req, res) => {
+  const user = await requireSession(req);
+  if (!user) {
+    return res.status(401).json({ code: 'unauthorized', message: '未登录或会话已过期' });
+  }
+  const pending = loadPending();
+  if (!pending) {
+    return res.status(400).json({ code: 'no_pending', message: '没有待确认的 TOTP 重置' });
+  }
+  const code = String((req.body && req.body.code) || '').trim();
+  if (!auth.verifyCode(pending.secret, code)) {
+    deletePending(); // 失败即作废 pending，保持旧正式 secret
+    return res.status(400).json({ code: 'invalid_code', message: '验证码错误' });
+  }
+  saveFormalSecret(pending.secret);
+  deletePending();
+  return res.json({ ok: true });
+});
+
+// POST /api/totp/setup —— 复用 auth.router（首次设置引导），限速/TOTP 逻辑不变
 app.use('/api/totp', auth.router);
 
 const loginLimiter = new RateLimiter({ maxFailures: 5, lockout: [60, 300, 900] });
