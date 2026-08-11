@@ -1,0 +1,29 @@
+{
+  "name": "totp-auth",
+  "version": "1.0.0",
+  "description": "Reusable TOTP authentication module (Base32 + HMAC-SHA1 + JWT + IP rate limiting), zero third-party dependencies.",
+  "main": "index.js",
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "lib/"
+  ],
+  "scripts": {
+    "test": "node test.js",
+    "check": "node --check index.js && node --check lib/totp.js && node --check lib/jwt.js && node --check lib/rate-limit.js && node --check test.js"
+  },
+  "keywords": [
+    "totp",
+    "2fa",
+    "otp",
+    "jwt",
+    "rate-limit"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "express": ">=4"
+  }
+}

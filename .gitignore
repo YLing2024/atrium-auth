@@ -1,0 +1,3 @@
+node_modules/
+totp-secret.json
+*.log
