@@ -395,7 +395,7 @@ const LOGIN_PAGE = `<!DOCTYPE html>
     <a id="uri" href="#" target="_blank" rel="noopener">添加 otpauth:// 条目</a>
   </div>
 
-  <div class="foot">HOME AUTH · TOTP + JWT</div>
+  <div class="foot">HOME AUTH</div>
 </div>
 <script>
 var REDIRECT = __REDIRECT__;
