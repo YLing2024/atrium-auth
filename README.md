@@ -42,7 +42,18 @@
 | GET | `/api/verify` | 无 | `?token=` 或 `Authorization: Bearer` → 验证 + 刷新 TTL，通过返回 `X-Auth-User` header |
 | POST | `/api/logout` | 无 | body `{token}` → 删除 Redis 会话 |
 | POST | `/api/totp/setup` | 无（仅首启） | 生成 TOTP secret，返回 `{secret, otpauthUri}` |
-| POST | `/api/totp/reset` | Bearer | 重置 TOTP secret |
+| POST | `/api/totp/reset` | Bearer（已登录） | **两阶段重置①**：生成新 secret 存 pending（5 分钟），**不覆盖正式**，返回 `{secret, otpauthUri, expiresIn}` |
+| POST | `/api/totp/confirm` | Bearer（已登录） | **两阶段重置②**：body `{code}` 用 pending secret 验证 → 通过才转正（旧 secret 作废）；失败/无 pending 丢弃 pending，旧 secret 保持 |
+
+## TOTP 重置流程（标准两阶段）
+
+```
+1. 已登录状态下调 /reset → 生成新 secret（pending，暂不生效）
+2. App 扫码绑定新 secret
+3. 输入新验证码调 /confirm → 验证通过 → 新 secret 正式生效（旧作废）
+   · 验证通过前旧码一直有效（不会锁在外面）
+   · 失败/取消 → pending 丢弃，旧 secret 不受影响
+```
 
 ## 子站接入（Nginx 探针，后端零代码）
 
