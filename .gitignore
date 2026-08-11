@@ -1,3 +1,4 @@
 node_modules/
 totp-secret.json
 *.log
+totp-pending.json
