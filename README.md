@@ -66,7 +66,7 @@ location = /auth-check {
 
 **前端 SSO 客户端**（登录跳转 + token 存取，约 30 行）：
 1. 无 token → 跳 `https://auth.example.com/auth?redirect=<本站地址>`
-2. 回跳解析 token（`#token=` 或 `?token=`）→ 存 localStorage
+2. 回跳解析 token（`?token=`）→ 存 localStorage
 3. 请求带 `Authorization: Bearer <token>`；401 → 清 token → 再跳认证中心
 
 ## 部署

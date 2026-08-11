@@ -167,9 +167,25 @@ app.post('/api/logout', async (req, res) => {
 
 function sanitizeRedirect(value) {
   const raw = typeof value === 'string' && value ? value : '/';
-  if (raw.startsWith('/')) return raw;
-  if (/^https?:\/\//i.test(raw)) return raw;
-  return '/';
+  if (!raw.startsWith('/') && !/^https?:\/\//i.test(raw)) return '/';
+
+  let url;
+  try {
+    url = /^https?:\/\//i.test(raw)
+      ? new URL(raw)
+      : new URL(raw, 'http://placeholder.invalid');
+  } catch {
+    return '/';
+  }
+
+  const pathname = url.pathname;
+  if (!pathname.endsWith('/') && !/\.[^/]+$/.test(pathname)) {
+    url.pathname = pathname + '/';
+  }
+
+  return raw.startsWith('/')
+    ? url.pathname + url.search + url.hash
+    : url.href;
 }
 
 const LOGIN_PAGE = `<!DOCTYPE html>
@@ -290,9 +306,10 @@ var setup = document.getElementById('setup');
 function showError(msg) { error.textContent = msg; error.classList.add('show'); }
 function hideError() { error.classList.remove('show'); }
 
-// 回跳用 URL fragment（#token=）而非 query：fragment 不会进入服务器访问日志
+// 回跳用 URL query（?token=，OAuth2 风格）：fragment 经 nginx 301 重定向会被丢弃，query 不会
 function redirectWithToken(token) {
-  window.location.href = REDIRECT + '#token=' + encodeURIComponent(token);
+  var sep = REDIRECT.indexOf('?') === -1 ? '?' : '&';
+  window.location.href = REDIRECT + sep + 'token=' + encodeURIComponent(token);
 }
 
 btn.addEventListener('click', login);
