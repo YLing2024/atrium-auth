@@ -214,6 +214,31 @@ async function registerSessionMeta(token, req) {
   resolveLocation(hashKey, ip); // 异步，不 await
 }
 
+// 撤销单个会话：删 token + 移出索引 + 删元数据（logout / 设备删除 / 同设备去重共用）
+async function revokeSession(token) {
+  await redis.del(token);
+  await redis.srem(SESSION_INDEX_KEY, token);
+  await redis.del(sessionHashKey(token));
+}
+
+// 设备指纹去重：登录成功后仅保留最新一次会话。
+// 匹配条件 = clientIp 完全相同 + User-Agent 完全相同的字符串比对（ip / userAgent 字段）；
+// 元数据缺失的旧会话跳过；全程 try/catch，去重失败不影响登录成功返回
+async function dedupSameDeviceSessions(newToken, req) {
+  const ip = clientIp(req);
+  const ua = String(req.headers['user-agent'] || '').slice(0, 300);
+  const members = await redis.smembers(SESSION_INDEX_KEY);
+  for (const t of members) {
+    if (t === newToken) continue;
+    if (!TOKEN_ID_RE.test(t)) continue;
+    const meta = await redis.hgetall(sessionHashKey(t));
+    if (!meta || !Object.keys(meta).length) continue; // 元数据缺失的旧会话跳过
+    if (meta.ip === ip && String(meta.userAgent || '') === ua) {
+      await revokeSession(t); // 同设备旧会话全部撤销，只保留本次新会话
+    }
+  }
+}
+
 // verify 成功后节流更新最近活跃：60s 内同一 token 只写一次；历史会话（无元数据）自动补建最小元数据
 const lastSeenWrites = new Map(); // token -> ts
 async function touchSession(token, req) {
@@ -391,6 +416,11 @@ app.post('/api/login', async (req, res) => {
   try {
     await redis.set(token, ISSUER, 'EX', SESSION_TTL);
     await registerSessionMeta(token, req); // 登记设备会话元数据（地理位置异步，不阻塞）
+    try {
+      await dedupSameDeviceSessions(token, req); // 撤销同设备指纹旧会话（失败不影响登录）
+    } catch (err) {
+      console.error(`[auth-server] login: dedup failed: ${err.message}`);
+    }
   } catch (err) {
     console.error(`[auth-server] login: redis SET failed: ${err.message}`);
     return res.status(500).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
@@ -442,9 +472,7 @@ app.post('/api/logout', async (req, res) => {
   }
   try {
     if (token) {
-      await redis.del(token);
-      await redis.srem(SESSION_INDEX_KEY, token); // 清理设备索引与元数据
-      await redis.del(sessionHashKey(token));
+      await revokeSession(token); // 删 token + 移出索引 + 删元数据
     }
     return res.json({ ok: true, message: 'Session revoked' });
   } catch (err) {
@@ -595,9 +623,7 @@ app.delete('/api/sessions/:id', async (req, res) => {
     return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
   }
   try {
-    await redis.del(id);
-    await redis.srem(SESSION_INDEX_KEY, id);
-    await redis.del(sessionHashKey(id));
+    await revokeSession(id);
     return res.json({ ok: true });
   } catch (e) {
     console.error(`[auth-server] sessions delete error: ${e.message}`);
