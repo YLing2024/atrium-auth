@@ -66,8 +66,185 @@ const app = express();
 app.disable('x-powered-by');
 app.use(express.json());
 
+// 取客户端 IP：nginx 反代时 req.ip 恒为 127.0.0.1（trust proxy 未开），
+// 故优先取 x-forwarded-for 第一段（最贴近真实客户端）→ x-real-ip → req.ip
 function clientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (fwd) {
+    const first = String(fwd).split(',')[0].trim();
+    if (first) return first;
+  }
+  const real = req.headers['x-real-ip'];
+  if (real) return String(real).trim();
   return req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+/* ============ 设备会话元数据（已登录设备管理的数据源） ============ */
+
+// 索引集合存全部已登记会话 token；hash `auth:session:<token>` 存元数据，EXPIRE 与 token 同 TTL
+const SESSION_INDEX_KEY = 'auth:sessions';
+function sessionHashKey(token) {
+  return 'auth:session:' + token;
+}
+
+// 私网判定：私网 IP 直接标记 isLocal='1'，不解析地理位置
+function isPrivateIp(ip) {
+  if (!ip) return true;
+  if (ip === '::1' || ip.startsWith('fe80:')) return true;
+  if (ip === 'unknown') return true;
+  if (ip.indexOf(':') !== -1) return false; // 其他 IPv6 视作公网（尽力解析）
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return false;
+  const [a, b] = parts;
+  if (a === 127 || a === 10) return true; // 127/8, 10/8
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12
+  if (a === 192 && b === 168) return true; // 192.168/16
+  if (a === 169 && b === 254) return true; // 169.254/16
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10
+  if (a === 0) return true;
+  if (a >= 224) return true;
+  return false;
+}
+
+// 从 User-Agent 推导设备名（浏览器 · 系统），与 /auth 登录页 JS 同一套规则
+function deviceNameFromUA(ua) {
+  if (!ua) return '';
+  const name = [];
+  let m;
+  if ((m = /Edg\/([\d.]+)/.exec(ua))) name.push('Edge ' + m[1]);
+  else if (/OPR\//.test(ua) || /Opera/.test(ua)) name.push('Opera');
+  else if ((m = /Firefox\/([\d.]+)/.exec(ua))) name.push('Firefox ' + m[1]);
+  else if (/SamsungBrowser\//.test(ua)) name.push('Samsung Browser');
+  else if (/MicroMessenger\//.test(ua)) name.push('WeChat');
+  else if ((m = /CriOS\/([\d.]+)/.exec(ua))) name.push('Chrome ' + m[1]);
+  else if ((m = /Chrome\/([\d.]+)/.exec(ua))) name.push('Chrome ' + m[1]);
+  else if (/Safari\//.test(ua)) name.push('Safari');
+  if (/Windows NT/.test(ua)) name.push('Windows');
+  else if (/iPhone|iPad|iPod/.test(ua)) name.push('iOS');
+  else if (/Mac OS X/.test(ua)) name.push('macOS');
+  else if (/Android/.test(ua)) name.push('Android');
+  else if (/CrOS/.test(ua)) name.push('ChromeOS');
+  else if (/Linux/.test(ua)) name.push('Linux');
+  return name.join(' · ').slice(0, 64);
+}
+
+// 地理位置后台异步解析：私网直接跳过（isLocal 登录时已置 1）；公网 fetch ip-api.com，
+// 2.5s 超时、失败静默留空；结果 24h 内存缓存，环境变量 AUTH_GEOIP_URL 可覆盖接口地址
+const GEOIP_URL =
+  process.env.AUTH_GEOIP_URL ||
+  'https://ip-api.com/json/{ip}?fields=status,country,regionName,city';
+const GEO_CACHE_TTL_MS = 24 * 3600 * 1000;
+const geoCache = new Map(); // ip -> { location, ts }
+
+function geoCacheGet(ip) {
+  const rec = geoCache.get(ip);
+  if (!rec) return undefined;
+  if (Date.now() - rec.ts > GEO_CACHE_TTL_MS) {
+    geoCache.delete(ip);
+    return undefined;
+  }
+  return rec.location;
+}
+
+function geoCacheSet(ip, location) {
+  if (geoCache.size > 5000) {
+    // 防内存膨胀：超限时清掉一半最旧条目
+    let n = 0;
+    for (const k of geoCache.keys()) {
+      geoCache.delete(k);
+      if (++n >= 2500) break;
+    }
+  }
+  geoCache.set(ip, { location, ts: Date.now() });
+}
+
+async function resolveLocation(hashKey, ip) {
+  try {
+    if (!ip || isPrivateIp(ip)) return;
+    const cached = geoCacheGet(ip);
+    if (cached !== undefined) {
+      if (cached) await redis.hset(hashKey, { location: cached });
+      return;
+    }
+    let data = null;
+    try {
+      const res = await fetch(GEOIP_URL.replace('{ip}', encodeURIComponent(ip)), {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(2500),
+      });
+      if (res.ok) data = await res.json().catch(() => null);
+    } catch (e) {
+      // 网络失败静默（留空）
+    }
+    let location = '';
+    if (data && data.status === 'success') {
+      location = [data.country, data.regionName, data.city].filter(Boolean).join(' ').trim();
+    }
+    geoCacheSet(ip, location);
+    if (location) await redis.hset(hashKey, { location });
+  } catch (e) {
+    // 地理位置解析失败不影响任何流程
+  }
+}
+
+// 登录后登记设备会话元数据：SADD 索引 + HSET 元数据 + EXPIRE（与 token 同 TTL）。
+// 地理位置解析异步执行，不阻塞登录响应
+async function registerSessionMeta(token, req) {
+  const ip = clientIp(req);
+  const rawName =
+    req.body && typeof req.body.deviceName === 'string' ? req.body.deviceName.trim() : '';
+  const deviceName = (rawName || deviceNameFromUA(req.headers['user-agent'] || '')).slice(0, 64);
+  const now = Date.now();
+  const hashKey = sessionHashKey(token);
+  await redis.sadd(SESSION_INDEX_KEY, token);
+  await redis.hset(hashKey, {
+    user: ISSUER,
+    deviceName,
+    ip,
+    location: '',
+    isLocal: isPrivateIp(ip) ? '1' : '0',
+    userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
+    createdAt: String(now),
+    lastSeenAt: String(now),
+  });
+  await redis.expire(hashKey, SESSION_TTL);
+  resolveLocation(hashKey, ip); // 异步，不 await
+}
+
+// verify 成功后节流更新最近活跃：60s 内同一 token 只写一次；历史会话（无元数据）自动补建最小元数据
+const lastSeenWrites = new Map(); // token -> ts
+async function touchSession(token, req) {
+  const now = Date.now();
+  const last = lastSeenWrites.get(token);
+  if (last && now - last < 60000) return;
+  if (lastSeenWrites.size > 20000) lastSeenWrites.clear();
+  lastSeenWrites.set(token, now);
+  try {
+    const hashKey = sessionHashKey(token);
+    const exists = await redis.exists(hashKey);
+    if (exists === 1) {
+      await redis.hset(hashKey, { lastSeenAt: String(now) });
+      await redis.expire(hashKey, SESSION_TTL);
+    } else {
+      // 历史会话补建最小元数据（设备名空、ip 取当前请求）
+      const ip = clientIp(req);
+      await redis.sadd(SESSION_INDEX_KEY, token);
+      await redis.hset(hashKey, {
+        user: ISSUER,
+        deviceName: '',
+        ip,
+        location: '',
+        isLocal: isPrivateIp(ip) ? '1' : '0',
+        userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
+        createdAt: String(now),
+        lastSeenAt: String(now),
+      });
+      await redis.expire(hashKey, SESSION_TTL);
+      resolveLocation(hashKey, ip);
+    }
+  } catch (e) {
+    console.error(`[auth-server] touchSession error: ${e.message}`);
+  }
 }
 
 /* ============ TOTP 两阶段重置（reset 生成 pending → confirm 验证转正） ============ */
@@ -210,6 +387,7 @@ app.post('/api/login', async (req, res) => {
   const token = crypto.randomBytes(32).toString('hex');
   try {
     await redis.set(token, ISSUER, 'EX', SESSION_TTL);
+    await registerSessionMeta(token, req); // 登记设备会话元数据（地理位置异步，不阻塞）
   } catch (err) {
     console.error(`[auth-server] login: redis SET failed: ${err.message}`);
     return res.status(500).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
@@ -242,6 +420,7 @@ app.get('/api/verify', async (req, res) => {
       return res.status(401).json({ code: 'invalid_token', message: 'Invalid or expired session' });
     }
     await redis.expire(token, SESSION_TTL); // 滑动过期：每次验证刷新 TTL
+    touchSession(token, req); // 节流更新最近活跃 + 历史会话补建元数据（不阻塞响应）
     const ttl = await redis.ttl(token);
     const exp = Math.floor(Date.now() / 1000) + Math.max(0, ttl);
     res.setHeader("X-Auth-User", user);
@@ -259,11 +438,167 @@ app.post('/api/logout', async (req, res) => {
     return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
   }
   try {
-    if (token) await redis.del(token);
+    if (token) {
+      await redis.del(token);
+      await redis.srem(SESSION_INDEX_KEY, token); // 清理设备索引与元数据
+      await redis.del(sessionHashKey(token));
+    }
     return res.json({ ok: true, message: 'Session revoked' });
   } catch (err) {
     console.error(`[auth-server] logout: redis error: ${err.message}`);
     return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
+  }
+});
+
+/* ============ 已登录设备管理（列表 / 重命名 / 删除） ============ */
+
+const TOKEN_ID_RE = /^[a-f0-9]{64}$/i;
+
+// GET /api/sessions —— 按最近活跃倒序返回全部已登录设备；
+// 已过期/无元数据的成员惰性移出索引并清理
+app.get('/api/sessions', async (req, res) => {
+  const user = await requireSession(req);
+  if (!user) {
+    return res.status(401).json({ code: 'unauthorized', message: '未登录或会话已过期' });
+  }
+  if (!redisAvailable()) {
+    return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
+  }
+  const currentToken = tokenFrom(req);
+  const nowSec = Math.floor(Date.now() / 1000);
+  try {
+    const members = await redis.smembers(SESSION_INDEX_KEY);
+    const sessions = [];
+    const stale = [];
+    for (const t of members) {
+      if (!TOKEN_ID_RE.test(t)) {
+        stale.push(t); // 非法成员：移出索引
+        continue;
+      }
+      let valid = false;
+      try {
+        valid = (await redis.exists(t)) === 1;
+      } catch (e) {
+        continue;
+      }
+      if (!valid) {
+        // 已过期：移出索引并清理元数据
+        stale.push(t);
+        await redis.del(sessionHashKey(t));
+        continue;
+      }
+      let meta;
+      try {
+        meta = await redis.hgetall(sessionHashKey(t));
+      } catch (e) {
+        continue;
+      }
+      if (!meta || !Object.keys(meta).length) {
+        // 有效会话但无元数据：惰性移出索引（下次 verify 会补建）
+        stale.push(t);
+        continue;
+      }
+      let ttl = 0;
+      try {
+        ttl = Math.max(0, await redis.ttl(t));
+      } catch (e) {
+        /* 忽略 TTL 读取失败 */
+      }
+      sessions.push({
+        id: t,
+        deviceName: meta.deviceName || '',
+        ip: meta.ip || '',
+        location: meta.location || '',
+        isLocal: meta.isLocal === '1',
+        userAgent: meta.userAgent || '',
+        createdAt: Number(meta.createdAt || 0),
+        lastSeenAt: Number(meta.lastSeenAt || 0),
+        expiresAt: nowSec + ttl,
+        isCurrent: t === currentToken,
+      });
+    }
+    if (stale.length) {
+      await redis.srem(SESSION_INDEX_KEY, ...stale);
+    }
+    sessions.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+    return res.json({ sessions });
+  } catch (e) {
+    console.error(`[auth-server] sessions list error: ${e.message}`);
+    return res.status(500).json({ code: 'server_error', message: '会话列表查询失败' });
+  }
+});
+
+// PUT /api/sessions/:id/name —— 重命名设备
+app.put('/api/sessions/:id/name', async (req, res) => {
+  const user = await requireSession(req);
+  if (!user) {
+    return res.status(401).json({ code: 'unauthorized', message: '未登录或会话已过期' });
+  }
+  const id = req.params.id;
+  if (!TOKEN_ID_RE.test(id)) {
+    return res.status(400).json({ code: 'invalid_id', message: '无效的会话标识' });
+  }
+  const raw = req.body && typeof req.body.deviceName === 'string' ? req.body.deviceName.trim() : '';
+  if (!raw) {
+    return res.status(400).json({ code: 'invalid_name', message: '设备名称不能为空' });
+  }
+  const deviceName = raw.slice(0, 64);
+  if (!redisAvailable()) {
+    return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
+  }
+  try {
+    const exists = (await redis.exists(id)) === 1;
+    if (!exists) {
+      return res.status(404).json({ code: 'not_found', message: '会话不存在或已过期' });
+    }
+    const hashKey = sessionHashKey(id);
+    const meta = await redis.hgetall(hashKey);
+    if (!meta || !Object.keys(meta).length) {
+      // 有效会话但无元数据：先补建最小元数据再改名
+      const now = Date.now();
+      const ip = clientIp(req);
+      await redis.sadd(SESSION_INDEX_KEY, id);
+      await redis.hset(hashKey, {
+        user: ISSUER,
+        deviceName: '',
+        ip,
+        location: '',
+        isLocal: isPrivateIp(ip) ? '1' : '0',
+        userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
+        createdAt: String(now),
+        lastSeenAt: String(now),
+      });
+    }
+    await redis.hset(hashKey, { deviceName });
+    await redis.expire(hashKey, SESSION_TTL);
+    return res.json({ ok: true, deviceName });
+  } catch (e) {
+    console.error(`[auth-server] sessions rename error: ${e.message}`);
+    return res.status(500).json({ code: 'server_error', message: '重命名失败' });
+  }
+});
+
+// DELETE /api/sessions/:id —— 删除设备 token，该设备必须重新认证（幂等）
+app.delete('/api/sessions/:id', async (req, res) => {
+  const user = await requireSession(req);
+  if (!user) {
+    return res.status(401).json({ code: 'unauthorized', message: '未登录或会话已过期' });
+  }
+  const id = req.params.id;
+  if (!TOKEN_ID_RE.test(id)) {
+    return res.status(400).json({ code: 'invalid_id', message: '无效的会话标识' });
+  }
+  if (!redisAvailable()) {
+    return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
+  }
+  try {
+    await redis.del(id);
+    await redis.srem(SESSION_INDEX_KEY, id);
+    await redis.del(sessionHashKey(id));
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error(`[auth-server] sessions delete error: ${e.message}`);
+    return res.status(500).json({ code: 'server_error', message: '删除会话失败' });
   }
 });
 
@@ -417,6 +752,28 @@ function redirectWithToken(token) {
 btn.addEventListener('click', login);
 code.addEventListener('keydown', function (e) { if (e.key === 'Enter') login(); });
 
+// 从 User-Agent 推导设备名（浏览器 · 系统），与后端 deviceNameFromUA 同一套规则
+function deviceName() {
+  var ua = navigator.userAgent || '';
+  var name = [];
+  var m;
+  if ((m = /Edg\\/([\\d.]+)/.exec(ua))) name.push('Edge ' + m[1]);
+  else if (/OPR\\//.test(ua) || /Opera/.test(ua)) name.push('Opera');
+  else if ((m = /Firefox\\/([\\d.]+)/.exec(ua))) name.push('Firefox ' + m[1]);
+  else if (/SamsungBrowser\\//.test(ua)) name.push('Samsung Browser');
+  else if (/MicroMessenger\\//.test(ua)) name.push('WeChat');
+  else if ((m = /CriOS\\/([\\d.]+)/.exec(ua))) name.push('Chrome ' + m[1]);
+  else if ((m = /Chrome\\/([\\d.]+)/.exec(ua))) name.push('Chrome ' + m[1]);
+  else if (/Safari\\//.test(ua)) name.push('Safari');
+  if (/Windows NT/.test(ua)) name.push('Windows');
+  else if (/iPhone|iPad|iPod/.test(ua)) name.push('iOS');
+  else if (/Mac OS X/.test(ua)) name.push('macOS');
+  else if (/Android/.test(ua)) name.push('Android');
+  else if (/CrOS/.test(ua)) name.push('ChromeOS');
+  else if (/Linux/.test(ua)) name.push('Linux');
+  return name.join(' · ').slice(0, 64);
+}
+
 function login() {
   var value = code.value.replace(/\\s/g, '');
   if (!/^\\d{6}$/.test(value)) { showError('请输入 6 位数字验证码'); return; }
@@ -425,7 +782,7 @@ function login() {
   fetch('/api/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code: value })
+    body: JSON.stringify({ code: value, deviceName: deviceName() })
   }).then(function (res) {
     return res.json().catch(function () { return {}; }).then(function (data) {
       return { status: res.status, data: data };
