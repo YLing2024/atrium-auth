@@ -177,8 +177,11 @@ async function resolveLocation(hashKey, ip) {
       // 网络失败静默（留空）
     }
     let location = '';
-    if (data && data.status === 'success') {
-      location = [data.country, data.regionName, data.city].filter(Boolean).join(' ').trim();
+    if (data && (data.status === 'success' || data.success === true)) {
+      location = [data.country, data.regionName || data.region, data.city]
+        .filter(Boolean)
+        .join(', ')
+        .trim();
     }
     geoCacheSet(ip, location);
     if (location) await redis.hset(hashKey, { location });
