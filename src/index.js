@@ -438,6 +438,49 @@ function tokenFrom(req) {
   return m ? m[1].trim() : '';
 }
 
+// 接口令牌（API Token）：只存哈希，不存明文；固定过期、不滑动续期、不 touchSession。
+// 绝不 sadd 进 SESSION_INDEX_KEY、绝不动 admin:session: 前缀、不写设备元数据 hash，
+// 与「登录设备管理」完全隔离（本服务内只在 verify 和本函数里触达 api:token: 前缀）
+function sha256(str) {
+  return crypto.createHash('sha256').update(String(str)).digest('hex');
+}
+
+const API_TOKEN_PREFIX = 'api:token:';
+const API_TOKEN_USED_THROTTLE_MS = 3600 * 1000; // lastUsedAt 节流更新窗口（>1 小时才写回）
+
+// 校验接口令牌：Redis GET api:token:<sha256(token)> 存在即有效（过期由 TTL 自动删除）。
+// 命中 → 解析 JSON → 返回 { ok, user: meta.name, exp }；解析失败/已过期按未命中返回 null
+async function verifyApiToken(token) {
+  const key = API_TOKEN_PREFIX + sha256(token);
+  let raw;
+  try {
+    raw = await redis.get(key);
+  } catch (err) {
+    console.error(`[auth-server] verify: api token check error: ${err.message}`);
+    return null;
+  }
+  if (!raw) return null;
+  let meta;
+  try {
+    meta = JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+  if (!meta || typeof meta.name !== 'string' || !meta.name) return null;
+  if (!(Number(meta.expiresAt) > Date.now())) return null; // 防御性判断（正常由 TTL 兜底）
+  try {
+    const lastUsed = Number(meta.lastUsedAt) || 0;
+    if (Date.now() - lastUsed > API_TOKEN_USED_THROTTLE_MS) {
+      meta.lastUsedAt = Date.now();
+      const ttl = Math.max(1, Math.floor((Number(meta.expiresAt) - Date.now()) / 1000));
+      await redis.set(key, JSON.stringify(meta), 'EX', ttl);
+    }
+  } catch (err) {
+    console.error(`[auth-server] verify: api token lastUsed update error: ${err.message}`);
+  }
+  return { ok: true, user: meta.name, exp: Number(meta.expiresAt) };
+}
+
 app.get('/api/verify', async (req, res) => {
   const token = tokenFrom(req);
   if (!token) {
@@ -450,7 +493,16 @@ app.get('/api/verify', async (req, res) => {
   try {
     const user = await redis.get(token);
     if (!user) {
-      return res.status(401).json({ code: 'invalid_token', message: 'Invalid or expired session' });
+      // 会话未命中：追加查接口令牌（固定过期、不滑动续期、不 touchSession）
+      const api = await verifyApiToken(token);
+      if (!api) {
+        return res.status(401).json({ code: 'invalid_token', message: 'Invalid or expired session' });
+      }
+      // X-Auth-User 必须为 ASCII（HTTP 头限制，中文名会被 Node 拒绝 → ERR_INVALID_CHAR）。
+      // 名称 ASCII 化保留可读性（如 api:my-tool），纯中文名则用固定值兜底；JSON body 里仍返回中文原名。
+      const hdrUser = String(api.user || '').replace(/[^\x20-\x7e]/g, '').trim().slice(0, 40);
+      res.setHeader("X-Auth-User", hdrUser || 'api-token');
+      return res.json(api);
     }
     await redis.expire(token, SESSION_TTL); // 滑动过期：每次验证刷新 TTL
     touchSession(token, req); // 节流更新最近活跃 + 历史会话补建元数据（不阻塞响应）
