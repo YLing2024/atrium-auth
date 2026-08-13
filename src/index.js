@@ -434,6 +434,9 @@ app.use('/api', auth.router);
 function tokenFrom(req) {
   const queryToken = req.query && req.query.token;
   if (queryToken) return String(queryToken).trim();
+  // nginx 探针转发:父请求 query token 经 X-Auth-Token 头传递(<img> 等无 header 场景)
+  const xAuthToken = req.headers['x-auth-token'];
+  if (xAuthToken) return String(xAuthToken).trim();
   const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
   return m ? m[1].trim() : '';
 }
