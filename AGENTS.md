@@ -4,11 +4,12 @@
 
 ## 这个项目是什么
 
-自建统一认证中心（HomeAuth）。整个自托管全家桶的登录入口：
+自建统一认证中心（SSO / OIDC Provider）。整个自托管全家桶的登录入口：
 
 - **TOTP 动态码登录**（无账号、无静态密码；30 秒一变，±1 步容忍）
 - **Redis 滑动过期会话**（默认 7 天不登录自动失效）
-- **中心化 token 验证**（`/api/verify`）—— 子站通过 nginx `auth_request` 探针接入，后端零鉴权代码
+- **业务站由 Auth Gateway 统一接管登录态**（Go 单二进制，`127.0.0.1:18920`）：网关走 OIDC（`/authorize` `/token` `/userinfo`）判断登录、维护站点 cookie、向后端注入 `X-Auth-User`；业务项目零鉴权代码。
+  `GET /api/verify` 仍保留，但**已不是主路径**，仅供旧探针 / 兼容场景使用。
 - 登录设备会话管理（列表 / 改名 / 踢下线）+ 来源 GeoIP
 - TOTP **两阶段重置**（pending secret 验证通过才转正，永远不会把已登录的人锁在外面）
 - 按 IP 阶梯限速防爆破
@@ -62,7 +63,7 @@ journalctl -u auth-server -n 100 --no-pager
 |---|---|---|---|
 | GET | `/auth` | 无 | 登录页（`?redirect=` 登录后回跳） |
 | POST | `/api/login` | 无 | `{code}` → 验 TOTP → 签发 token 存 Redis |
-| GET | `/api/verify` | 无 | `?token=` / `X-Auth-Token` / Bearer → 会话令牌**或首方 SSO 令牌**验证 + 刷新 TTL，通过返回 `X-Auth-User` |
+| GET | `/api/verify` | 无 | **兼容保留**（网关走 `/_auth/*` 与 OIDC 端点，不再走探针）：`?token=` / `X-Auth-Token` / Bearer → 会话令牌**或首方 SSO 令牌**验证 + 刷新 TTL，通过返回 `X-Auth-User`（= `SSO_SUBJECT`） |
 | POST | `/api/logout` | 无 | `{token}` → 删会话 |
 | POST | `/api/totp/setup` | 无（仅首启） | 生成 secret，返回 `{secret, otpauthUri}` |
 | POST | `/api/totp/reset` | Bearer | 两阶段①：生成 pending secret（5 分钟），不覆盖正式 |
@@ -77,8 +78,8 @@ OIDC（根路径，issuer 取 `ISSUER` 环境变量）：
 |---|---|---|
 | GET | `/.well-known/openid-configuration` | Discovery |
 | GET | `/authorize` | 授权端点（PKCE S256；redirect_uri 精确匹配） |
-| POST | `/token` | code / refresh（refresh 轮换+重放整链作废） |
-| GET | `/userinfo` | Bearer access_token |
+| POST | `/token` | code / refresh（refresh 轮换+重放整链作废）；access_token 为 **ES256 JWT** |
+| GET | `/userinfo` | Bearer access_token（支持 JWT 与旧式不透明串） |
 | GET | `/jwks.json` | ES256 公钥集 |
 | POST | `/introspect` | RFC 7662（也接受 Bearer） |
 | GET/POST | `/end_session` | RP-Initiated Logout（回跳白名单） |
@@ -105,6 +106,8 @@ app.use(oidc.router)           ← OIDC 路由挂根路径（/authorize /token .
 | `REDIS_DB` | `0` | Redis 库号（测试实例用 15 隔离） |
 | `DATA_DIR` | 项目根 | 密钥 / 注册表所在目录（totp-secret、jwt-secret、oidc-keys.json、clients.json） |
 | `ISSUER` | `http://127.0.0.1:3200` | OIDC issuer，所有端点 URL 由它拼接；**不得硬编码真实域名** |
+| `SSO_SUBJECT` | `linden` | 用户稳定唯一标识：`sub` / `preferred_username` / `X-Auth-User`。与 `ISSUER` 无关 |
+| `SSO_DISPLAY_NAME` | = `SSO_SUBJECT` | 展示名：OIDC `name`（id_token / userinfo） |
 | `SESSION_DAYS` | `7` | 会话滑动过期天数 |
 | `JWT_SECRET` | 读 `jwt-secret` 文件 | 签发密钥 |
 | `AUTH_GEOIP_URL` | `https://ipwho.is/{ip}?fields=success,country,region,city` | 登录来源解析 |
@@ -115,16 +118,16 @@ app.use(oidc.router)           ← OIDC 路由挂根路径（/authorize /token .
 - 两阶段重置语义不能简化成「直接覆盖」——否则用户一旦绑错设备就永久锁死。
 - 限速必须**按真实客户端 IP**（阶梯 60s → 300s → 900s）；nginx 侧要把 `X-Real-IP` 传进来。
 - **redirect_uri 必须与注册值字符串精确相等**（不许前缀/通配）——授权端点第一安全边界。
-- **id_token 只准 ES256**（P-256，带 `kid`）；禁止 HS256；access/refresh/sso token 只存哈希。
+- **id_token 与 access_token 只准 ES256**（P-256，带 `kid`，共用 `oidc-keys.json`）；禁止 HS256。access_token 虽为 JWT，**撤销仍以 Redis 哈希记录为准**（不许"签名有效就永远有效"）；refresh / sso token 只存哈希。
+- 身份只有一个来源：`SSO_SUBJECT`（展示名 `SSO_DISPLAY_NAME`）。OIDC 路径与 `/api/verify` 必须给出**完全一致**的身份；历史标签 `HomeAuth` 仅是 cookie 名 / 旧 Redis 值，读取时归一化为 `SSO_SUBJECT`。
 - 不要把 `auth.example.com`、服务器 IP 等私有地址写进任何源代码；OIDC issuer 走 `ISSUER` 环境变量。
 
 ## 已知坑
 
-- **`/auth-check` 探针的 query token 会丢**：nginx `auth_request` 子请求默认不带原始 query，主域配置里已手动把父请求 args 拼回（见 `homepage.conf` 的 `/auth-check` 块）。别的域名接探针时要照抄这段，否则 `?token=` 场景全部 401。
-- **OIDC 端点挂在根路径**（`/authorize` `/token` `/jwks.json` …），而 nginx 目前只反代 `/api/`；投产前必须在 nginx 加对应 location（本次改造不含配置改动）。
+- **nginx `auth_request` 探针 / `/auth-check` 已废弃**：全站登录态由 Auth Gateway 接管（站点 nginx 只做 TLS + 路由，`/_auth/*` 转网关）。不要再新增 `/auth-check` location，也不要再依赖 `?token=` / `X-Auth-Token` 传令牌；`/api/verify` 仅作兼容保留。
+- **OIDC 端点挂在根路径**（`/authorize` `/token` `/jwks.json` …），由 Auth Gateway 在服务端（loopback）调用；不需要给业务站 nginx 暴露这些路径。
 - **首方客户端（`first_party:true`）不强制 PKCE**：auth-server 自己完成 code→token，code 不落浏览器；普通公开客户端仍强制 S256。
 - **首方 SSO 令牌与会话的关联**：`ensureSsoSession` 建的记录含 `session_hash`（来源会话 token 哈希），并写反向索引 `oidc:sso-session:<会话哈希>` → SSO 令牌哈希集合。`/api/logout`、`DELETE /api/sessions/:id`、同设备去重共用 `revokeSession`，会连带删除 `oidc:sso:<哈希>`（登出后共享 cookie 立即失效，不用满 7 天）。改 `revokeSession` 或 `ensureSsoSession` 时必须保持这对关联。
-- `proxy_method GET` + 清空 `Content-Length`/`Content-Type` 是必须的：否则带 body 的 PUT/POST 会被探针挂起直到 504。
 - Redis 挂了等于全站登不上；排查顺序：`systemctl status redis-server` → `redis-cli ping`。
 - 单文件无热重载，改完必须重启。
 
