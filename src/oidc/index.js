@@ -24,7 +24,12 @@ const {
 } = require('./util');
 
 const CODE_TTL = 60; // 授权码 60 秒
-const ACCESS_TTL = 3600; // access_token 1 小时
+// access_token 有效期（秒）。默认 15 分钟：Bearer 是本地验签，吊销后最多还能用到到期满，
+// 故把暴露窗口压到 15 分钟（refresh_token 轮转仍是立刻失效）。可用 ACCESS_TTL_SEC 覆盖（下限 60 秒）。
+const ACCESS_TTL = (() => {
+  const v = Number(process.env.ACCESS_TTL_SEC);
+  return Number.isFinite(v) && v >= 60 ? Math.floor(v) : 900;
+})();
 const REFRESH_TTL = 30 * 86400; // refresh_token 30 天
 
 const CODE_PREFIX = 'oidc:code:';
