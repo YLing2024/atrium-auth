@@ -10,3 +10,4 @@ clients.json
 # 本机项目记忆（只存本地，不提交 / 不推送）
 PROJECT_MEMORY.md
 jwt-secret
+internal-token

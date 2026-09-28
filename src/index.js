@@ -48,6 +48,37 @@ function loadOrCreateJwtSecret() {
 
 const jwtSecret = loadOrCreateJwtSecret();
 
+// 内部接口共享令牌（供本机服务如 admin-server 调用 /api/internal/*）。
+// 首次启动自动生成随机值并写 0600 文件；令牌值绝不打印、绝不返回给客户端。
+const INTERNAL_TOKEN_FILE =
+  process.env.INTERNAL_TOKEN_FILE || path.join(DATA_DIR, 'internal-token');
+
+function loadOrCreateInternalToken() {
+  if (process.env.INTERNAL_TOKEN) return process.env.INTERNAL_TOKEN;
+  try {
+    const existing = fs.readFileSync(INTERNAL_TOKEN_FILE, 'utf8').trim();
+    if (existing) return existing;
+  } catch (e) {
+    /* 文件不存在：下面生成 */
+  }
+  const generated = crypto.randomBytes(32).toString('hex');
+  fs.mkdirSync(path.dirname(INTERNAL_TOKEN_FILE), { recursive: true });
+  fs.writeFileSync(INTERNAL_TOKEN_FILE, generated, { mode: 0o600 });
+  return generated;
+}
+
+const internalToken = loadOrCreateInternalToken();
+
+// 内部令牌比对：定长 sha256 后再 timingSafeEqual，避免长度/时序差异；
+// 未提交或不匹配一律视为鉴权失败（调用方返回 401）。
+function internalTokenMatches(req) {
+  const provided = String(req.headers['x-internal-token'] || '');
+  if (!provided) return false;
+  const a = crypto.createHash('sha256').update(provided).digest();
+  const b = crypto.createHash('sha256').update(internalToken).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
 const auth = createTotpAuth({
   secretFile: SECRET_FILE,
   issuer: SSO_DISPLAY_NAME,
@@ -571,6 +602,69 @@ app.post('/api/logout', async (req, res) => {
 
 const TOKEN_ID_RE = /^[a-f0-9]{64}$/i;
 
+// 收集会话列表（/api/sessions 与内部接口共用，保证返回结构完全一致）。
+// sub 非空时只返回属于该用户的会话（当前为单用户，预留多用户过滤）。
+// currentToken 非空时把对应会话标记 isCurrent；内部调用没有客户端令牌，传 null。
+async function collectSessions(currentToken, sub) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const members = await redis.smembers(SESSION_INDEX_KEY);
+  const sessions = [];
+  const stale = [];
+  for (const t of members) {
+    if (!TOKEN_ID_RE.test(t)) {
+      stale.push(t); // 非法成员：移出索引
+      continue;
+    }
+    let valid = false;
+    try {
+      valid = (await redis.exists(t)) === 1;
+    } catch (e) {
+      continue;
+    }
+    if (!valid) {
+      // 已过期：移出索引并清理元数据
+      stale.push(t);
+      await redis.del(sessionHashKey(t));
+      continue;
+    }
+    let meta;
+    try {
+      meta = await redis.hgetall(sessionHashKey(t));
+    } catch (e) {
+      continue;
+    }
+    if (!meta || !Object.keys(meta).length) {
+      // 有效会话但无元数据：惰性移出索引（下次 verify 会补建）
+      stale.push(t);
+      continue;
+    }
+    if (sub && normalizeSubject(meta.user) !== sub) continue; // 只看该用户的会话
+    let ttl = 0;
+    try {
+      ttl = Math.max(0, await redis.ttl(t));
+    } catch (e) {
+      /* 忽略 TTL 读取失败 */
+    }
+    sessions.push({
+      id: t,
+      deviceName: meta.deviceName || '',
+      ip: meta.ip || '',
+      location: meta.location || '',
+      isLocal: meta.isLocal === '1',
+      userAgent: meta.userAgent || '',
+      createdAt: Number(meta.createdAt || 0),
+      lastSeenAt: Number(meta.lastSeenAt || 0),
+      expiresAt: nowSec + ttl,
+      isCurrent: !!currentToken && t === currentToken,
+    });
+  }
+  if (stale.length) {
+    await redis.srem(SESSION_INDEX_KEY, ...stale);
+  }
+  sessions.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  return sessions;
+}
+
 // GET /api/sessions —— 按最近活跃倒序返回全部已登录设备；
 // 已过期/无元数据的成员惰性移出索引并清理
 app.get('/api/sessions', async (req, res) => {
@@ -582,62 +676,8 @@ app.get('/api/sessions', async (req, res) => {
     return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
   }
   const currentToken = tokenFrom(req);
-  const nowSec = Math.floor(Date.now() / 1000);
   try {
-    const members = await redis.smembers(SESSION_INDEX_KEY);
-    const sessions = [];
-    const stale = [];
-    for (const t of members) {
-      if (!TOKEN_ID_RE.test(t)) {
-        stale.push(t); // 非法成员：移出索引
-        continue;
-      }
-      let valid = false;
-      try {
-        valid = (await redis.exists(t)) === 1;
-      } catch (e) {
-        continue;
-      }
-      if (!valid) {
-        // 已过期：移出索引并清理元数据
-        stale.push(t);
-        await redis.del(sessionHashKey(t));
-        continue;
-      }
-      let meta;
-      try {
-        meta = await redis.hgetall(sessionHashKey(t));
-      } catch (e) {
-        continue;
-      }
-      if (!meta || !Object.keys(meta).length) {
-        // 有效会话但无元数据：惰性移出索引（下次 verify 会补建）
-        stale.push(t);
-        continue;
-      }
-      let ttl = 0;
-      try {
-        ttl = Math.max(0, await redis.ttl(t));
-      } catch (e) {
-        /* 忽略 TTL 读取失败 */
-      }
-      sessions.push({
-        id: t,
-        deviceName: meta.deviceName || '',
-        ip: meta.ip || '',
-        location: meta.location || '',
-        isLocal: meta.isLocal === '1',
-        userAgent: meta.userAgent || '',
-        createdAt: Number(meta.createdAt || 0),
-        lastSeenAt: Number(meta.lastSeenAt || 0),
-        expiresAt: nowSec + ttl,
-        isCurrent: t === currentToken,
-      });
-    }
-    if (stale.length) {
-      await redis.srem(SESSION_INDEX_KEY, ...stale);
-    }
-    sessions.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+    const sessions = await collectSessions(currentToken, null);
     return res.json({ sessions });
   } catch (e) {
     console.error(`[auth-server] sessions list error: ${e.message}`);
@@ -713,6 +753,113 @@ app.delete('/api/sessions/:id', async (req, res) => {
     return res.json({ ok: true });
   } catch (e) {
     console.error(`[auth-server] sessions delete error: ${e.message}`);
+    return res.status(500).json({ code: 'server_error', message: '删除会话失败' });
+  }
+});
+
+/* ============ 内部接口（仅本机服务调用；共享内部令牌鉴权，不走 requireSession） ============ */
+// 供 admin-server 等本机服务使用：按 sub 参数定位用户，不再依赖客户端令牌。
+// 不匹配 X-Internal-Token 一律 401；令牌值绝不写日志。
+
+function internalAuthOk(req, res) {
+  if (internalTokenMatches(req)) return true;
+  res.status(401).json({ code: 'unauthorized', message: 'Invalid internal token' });
+  return false;
+}
+
+function internalSub(req) {
+  return String((req.query && req.query.sub) || '').trim();
+}
+
+// GET /api/internal/sessions?sub=<用户名> —— 返回结构与 /api/sessions 完全一致
+app.get('/api/internal/sessions', async (req, res) => {
+  if (!internalAuthOk(req, res)) return;
+  const sub = internalSub(req);
+  if (!sub) return res.status(400).json({ code: 'invalid_sub', message: '缺少 sub 参数' });
+  if (!redisAvailable()) {
+    return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
+  }
+  try {
+    const sessions = await collectSessions(null, sub);
+    return res.json({ sessions });
+  } catch (e) {
+    console.error(`[auth-server] internal sessions list error: ${e.message}`);
+    return res.status(500).json({ code: 'server_error', message: '会话列表查询失败' });
+  }
+});
+
+// PUT /api/internal/sessions/:id/name —— 重命名设备（结构与 /api/sessions/:id/name 一致）
+app.put('/api/internal/sessions/:id/name', async (req, res) => {
+  if (!internalAuthOk(req, res)) return;
+  const id = req.params.id;
+  if (!TOKEN_ID_RE.test(id)) {
+    return res.status(400).json({ code: 'invalid_id', message: '无效的会话标识' });
+  }
+  const raw = req.body && typeof req.body.deviceName === 'string' ? req.body.deviceName.trim() : '';
+  if (!raw) {
+    return res.status(400).json({ code: 'invalid_name', message: '设备名称不能为空' });
+  }
+  const deviceName = raw.slice(0, 64);
+  if (!redisAvailable()) {
+    return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
+  }
+  try {
+    const exists = (await redis.exists(id)) === 1;
+    if (!exists) {
+      return res.status(404).json({ code: 'not_found', message: '会话不存在或已过期' });
+    }
+    const hashKey = sessionHashKey(id);
+    const meta = await redis.hgetall(hashKey);
+    const sub = internalSub(req);
+    if (meta && Object.keys(meta).length && sub && normalizeSubject(meta.user) !== sub) {
+      return res.status(404).json({ code: 'not_found', message: '会话不存在或已过期' });
+    }
+    if (!meta || !Object.keys(meta).length) {
+      // 有效会话但无元数据：按内部调用者身份补建最小元数据（与公开接口行为一致）
+      const now = Date.now();
+      await redis.sadd(SESSION_INDEX_KEY, id);
+      await redis.hset(hashKey, {
+        user: sub || SSO_SUBJECT,
+        deviceName: '',
+        ip: '',
+        location: '',
+        isLocal: '1',
+        userAgent: '',
+        createdAt: String(now),
+        lastSeenAt: String(now),
+      });
+    }
+    await redis.hset(hashKey, { deviceName });
+    await redis.expire(hashKey, SESSION_TTL);
+    return res.json({ ok: true, deviceName });
+  } catch (e) {
+    console.error(`[auth-server] internal sessions rename error: ${e.message}`);
+    return res.status(500).json({ code: 'server_error', message: '重命名失败' });
+  }
+});
+
+// DELETE /api/internal/sessions/:id —— 删除设备 token（结构与公开接口一致，幂等）
+app.delete('/api/internal/sessions/:id', async (req, res) => {
+  if (!internalAuthOk(req, res)) return;
+  const id = req.params.id;
+  if (!TOKEN_ID_RE.test(id)) {
+    return res.status(400).json({ code: 'invalid_id', message: '无效的会话标识' });
+  }
+  if (!redisAvailable()) {
+    return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
+  }
+  try {
+    const sub = internalSub(req);
+    if (sub) {
+      const meta = await redis.hgetall(sessionHashKey(id));
+      if (meta && Object.keys(meta).length && normalizeSubject(meta.user) !== sub) {
+        return res.status(404).json({ code: 'not_found', message: '会话不存在或已过期' });
+      }
+    }
+    await revokeSession(id);
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error(`[auth-server] internal sessions delete error: ${e.message}`);
     return res.status(500).json({ code: 'server_error', message: '删除会话失败' });
   }
 });

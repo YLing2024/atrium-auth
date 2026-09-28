@@ -45,6 +45,13 @@
 | POST | `/api/totp/setup` | 无（仅首启） | 生成 TOTP secret，返回 `{secret, otpauthUri}` |
 | POST | `/api/totp/reset` | Bearer（已登录） | **两阶段重置①**：生成新 secret 存 pending（5 分钟），**不覆盖正式**，返回 `{secret, otpauthUri, expiresIn}` |
 | POST | `/api/totp/confirm` | Bearer（已登录） | **两阶段重置②**：body `{code}` 用 pending secret 验证 → 通过才转正（旧 secret 作废）；失败/无 pending 丢弃 pending，旧 secret 保持 |
+| GET | `/api/internal/sessions?sub=` | `X-Internal-Token` | **内部**（仅本机服务）：按 `sub` 返回设备会话列表，结构同 `/api/sessions` |
+| PUT | `/api/internal/sessions/:id/name` | `X-Internal-Token` | **内部**：重命名会话 |
+| DELETE | `/api/internal/sessions/:id` | `X-Internal-Token` | **内部**：踢下线 |
+
+> `/api/internal/*` 是给本机服务（如 admin-server）调用的内部接口：只认共享令牌 `X-Internal-Token`，
+> **不接受**任何客户端凭证（cookie / Bearer JWT / 会话 token），也不走 `requireSession`。
+> 令牌首次启动自动生成到 `<DATA_DIR>/internal-token`（0600），可用 `INTERNAL_TOKEN_FILE` 指定路径。
 
 ## OIDC Provider（标准接入，OAuth 2.1 + OIDC Core 1.0）
 

@@ -71,6 +71,12 @@ journalctl -u auth-server -n 100 --no-pager
 | GET | `/api/sessions` | Bearer | 登录设备会话列表 |
 | PUT | `/api/sessions/:id/name` | Bearer | 重命名会话 |
 | DELETE | `/api/sessions/:id` | Bearer | 踢下线 |
+| GET | `/api/internal/sessions?sub=` | `X-Internal-Token` | **内部**：按 `sub` 定位用户的设备会话列表（结构同 `/api/sessions`），供本机服务调用 |
+| PUT | `/api/internal/sessions/:id/name` | `X-Internal-Token` | **内部**：重命名会话 |
+| DELETE | `/api/internal/sessions/:id` | `X-Internal-Token` | **内部**：踢下线 |
+
+> `/api/internal/*` 只认共享内部令牌（`X-Internal-Token`），**不走 `requireSession`**：任何客户端凭证（cookie / Bearer JWT / 会话 token）都无效。
+> 令牌首次启动自动生成到 `INTERNAL_TOKEN_FILE`（默认 `<DATA_DIR>/internal-token`，0600），值绝不打印、不返回。
 
 OIDC（根路径，issuer 取 `ISSUER` 环境变量）：
 
@@ -110,6 +116,7 @@ app.use(oidc.router)           ← OIDC 路由挂根路径（/authorize /token .
 | `SSO_DISPLAY_NAME` | = `SSO_SUBJECT` | 展示名：OIDC `name`（id_token / userinfo） |
 | `SESSION_DAYS` | `7` | 会话滑动过期天数 |
 | `JWT_SECRET` | 读 `jwt-secret` 文件 | 签发密钥 |
+| `INTERNAL_TOKEN_FILE` | `<DATA_DIR>/internal-token` | 内部接口共享令牌文件（0600 自动生成；`INTERNAL_TOKEN` 可直接覆盖值） |
 | `AUTH_GEOIP_URL` | `https://ipwho.is/{ip}?fields=success,country,region,city` | 登录来源解析 |
 
 ## 安全红线
