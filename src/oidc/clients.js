@@ -130,6 +130,11 @@ class ClientRegistry {
 
   load() {
     if (!this.file || !fs.existsSync(this.file)) return;
+    try {
+      fs.chmodSync(this.file, 0o600); // 注册表含 client_secret，收紧为 0600
+    } catch (e) {
+      /* 部分文件系统不支持，忽略 */
+    }
     let data;
     try {
       data = JSON.parse(fs.readFileSync(this.file, 'utf8'));
