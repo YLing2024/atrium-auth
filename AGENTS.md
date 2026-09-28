@@ -28,10 +28,18 @@
 
 ```
 src/index.js          # 登录页 + 全部路由（单文件）
+src/oidc/             # OIDC Provider：discovery/authorize/token/userinfo/jwks/introspect/end_session/revoke
+├── index.js          # createOidcProvider() 工厂（挂到 app 根路径）
+├── keys.js           # ES256 密钥库（oidc-keys.json / JWKS / kid=thumbprint）
+├── clients.js        # 客户端注册表（clients.json / redirect_uri 精确匹配）
+└── util.js           # base64url / PKCE S256 / cookie / 哈希
 lib/totp-auth/        # TOTP 模块：生成/验证/限速/JWT
 ├── index.js          # createTotpAuth() 工厂（含 auth.router 内置路由）
 └── lib/{totp,rate-limit,jwt}.js
 public/index.html     # 登录页静态资源
+clients.json          # OIDC 客户端注册表（本地，不入库）
+clients.example.json  # 注册表占位示例（入库）
+oidc-keys.json        # OIDC ES256 私钥（本地，不入库）
 totp-secret.json      # TOTP 正式 secret（本地，不入库）
 totp-pending.json     # 重置中的 pending secret（本地，不入库）
 jwt-secret            # JWT 密钥（本地，不入库）
@@ -63,13 +71,29 @@ journalctl -u auth-server -n 100 --no-pager
 | PUT | `/api/sessions/:id/name` | Bearer | 重命名会话 |
 | DELETE | `/api/sessions/:id` | Bearer | 踢下线 |
 
+OIDC（根路径，issuer 取 `ISSUER` 环境变量）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/.well-known/openid-configuration` | Discovery |
+| GET | `/authorize` | 授权端点（PKCE S256；redirect_uri 精确匹配） |
+| POST | `/token` | code / refresh（refresh 轮换+重放整链作废） |
+| GET | `/userinfo` | Bearer access_token |
+| GET | `/jwks.json` | ES256 公钥集 |
+| POST | `/introspect` | RFC 7662（也接受 Bearer） |
+| GET/POST | `/end_session` | RP-Initiated Logout（回跳白名单） |
+| POST | `/revoke` | RFC 7009 |
+| GET | `/auth` | 登录页（`?redirect=` 旧流程 + 白名单 + Deprecated） |
+
 ## 路由注册顺序（有坑，别乱动）
 
 ```
+POST /api/totp/reset|confirm   ← 自定义实现必须在 app.use('/api/totp', auth.router) 之前
 POST /api/login   ← 自定义实现必须注册在 app.use('/api', auth.router) 之前
 app.use('/api/totp', auth.router)
 app.use('/api', auth.router)   ← 模块内置 JWT login，会覆盖同路径
 /api/verify /api/logout /api/sessions…
+app.use(oidc.router)           ← OIDC 路由挂根路径（/authorize /token ...），最后挂
 ```
 
 ## 环境变量
@@ -78,20 +102,27 @@ app.use('/api', auth.router)   ← 模块内置 JWT login，会覆盖同路径
 |---|---|---|
 | `PORT` / `HOST` | `3200` / `127.0.0.1` | systemd 显式设置 |
 | `REDIS_HOST` / `REDIS_PORT` | `127.0.0.1` / `6379` | 会话存储 |
+| `REDIS_DB` | `0` | Redis 库号（测试实例用 15 隔离） |
+| `DATA_DIR` | 项目根 | 密钥 / 注册表所在目录（totp-secret、jwt-secret、oidc-keys.json、clients.json） |
+| `ISSUER` | `http://127.0.0.1:3200` | OIDC issuer，所有端点 URL 由它拼接；**不得硬编码真实域名** |
 | `SESSION_DAYS` | `7` | 会话滑动过期天数 |
 | `JWT_SECRET` | 读 `jwt-secret` 文件 | 签发密钥 |
 | `AUTH_GEOIP_URL` | `https://ipwho.is/{ip}?fields=success,country,region,city` | 登录来源解析 |
 
 ## 安全红线
 
-- TOTP secret、pending secret、JWT 密钥**一律不入库**，已被 `.gitignore` 拦截。
+- TOTP secret、pending secret、JWT 密钥、`oidc-keys.json`、`clients.json`**一律不入库**，已被 `.gitignore` 拦截。
 - 两阶段重置语义不能简化成「直接覆盖」——否则用户一旦绑错设备就永久锁死。
 - 限速必须**按真实客户端 IP**（阶梯 60s → 300s → 900s）；nginx 侧要把 `X-Real-IP` 传进来。
-- 不要把 `auth.example.com`、服务器 IP 等私有地址写进任何源代码（前端跳转地址由调用方带 `redirect` 参数传入）。
+- **redirect_uri 必须与注册值字符串精确相等**（不许前缀/通配）——授权端点第一安全边界。
+- **id_token 只准 ES256**（P-256，带 `kid`）；禁止 HS256；access/refresh/sso token 只存哈希。
+- 不要把 `auth.example.com`、服务器 IP 等私有地址写进任何源代码；OIDC issuer 走 `ISSUER` 环境变量。
 
 ## 已知坑
 
 - **`/auth-check` 探针的 query token 会丢**：nginx `auth_request` 子请求默认不带原始 query，主域配置里已手动把父请求 args 拼回（见 `homepage.conf` 的 `/auth-check` 块）。别的域名接探针时要照抄这段，否则 `?token=` 场景全部 401。
+- **OIDC 端点挂在根路径**（`/authorize` `/token` `/jwks.json` …），而 nginx 目前只反代 `/api/`；投产前必须在 nginx 加对应 location（本次改造不含配置改动）。
+- **首方客户端（`first_party:true`）不强制 PKCE**：auth-server 自己完成 code→token，code 不落浏览器；普通公开客户端仍强制 S256。
 - `proxy_method GET` + 清空 `Content-Length`/`Content-Type` 是必须的：否则带 body 的 PUT/POST 会被探针挂起直到 504。
 - Redis 挂了等于全站登不上；排查顺序：`systemctl status redis-server` → `redis-cli ping`。
 - 单文件无热重载，改完必须重启。

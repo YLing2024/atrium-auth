@@ -45,6 +45,29 @@
 | POST | `/api/totp/reset` | Bearer（已登录） | **两阶段重置①**：生成新 secret 存 pending（5 分钟），**不覆盖正式**，返回 `{secret, otpauthUri, expiresIn}` |
 | POST | `/api/totp/confirm` | Bearer（已登录） | **两阶段重置②**：body `{code}` 用 pending secret 验证 → 通过才转正（旧 secret 作废）；失败/无 pending 丢弃 pending，旧 secret 保持 |
 
+## OIDC Provider（标准接入，OAuth 2.1 + OIDC Core 1.0）
+
+TOTP 仍是唯一的用户验证手段；标准只规范流程。issuer 取环境变量 `ISSUER`（默认 `http://127.0.0.1:3200`）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/.well-known/openid-configuration` | Discovery |
+| GET | `/authorize` | 授权端点（PKCE S256） |
+| POST | `/token` | `authorization_code` / `refresh_token`（refresh 轮换 + 重放整链作废） |
+| GET | `/userinfo` | `Authorization: Bearer <access_token>` |
+| GET | `/jwks.json` | ES256 公钥集（带 `kid`） |
+| POST | `/introspect` | RFC 7662；也接受 `Authorization: Bearer` |
+| GET/POST | `/end_session` | RP-Initiated Logout（`post_logout_redirect_uri` 白名单） |
+| POST | `/revoke` | RFC 7009 |
+| GET | `/auth` | 登录页（`?redirect=` 旧流程保留，白名单 + `Deprecated` 标记） |
+
+- **redirect_uri 精确匹配**：只接受注册表里完全相等的字符串，堵开放重定向 / token 外泄。
+- **id_token 只用 ES256**（P-256，`kid`=JWK thumbprint）；密钥首次启动生成 `<DATA_DIR>/oidc-keys.json`（0600）。
+- **首方模式**（`"first_party": true`）：auth-server 自己完成 code→token，`Set-Cookie`（HttpOnly/SameSite=Lax/`Domain` 取 `cookie_domain`）后 302 回跳，子站前端零 SSO 代码。
+- 客户端注册表：`clients.json`（0600，gitignore），格式见 `clients.example.json`；非法条目（空 redirect_uris / 含 `*` / 非 http(s)）加载时跳过。
+
+> nginx 现状只把 `/api/` 反代到本服务；OIDC 端点挂在根路径，投产前需在 nginx 增加对应 location（本次改造不含配置改动）。
+
 ## TOTP 重置流程（标准两阶段）
 
 ```
@@ -94,10 +117,17 @@ node src/index.js          # 端口 3200
 
 ```
 ├── src/index.js            # 认证服务（登录页/签发/验证/登出/TOTP 管理）
+├── src/oidc/               # OIDC Provider（新增）
+│   ├── index.js            # createOidcProvider()：discovery/authorize/token/... 路由
+│   ├── keys.js             # ES256 密钥库（oidc-keys.json / JWKS / 轮换）
+│   ├── clients.js          # 客户端注册表（clients.json / 精确 redirect_uri 校验）
+│   └── util.js             # base64url / PKCE S256 / cookie / 哈希
 ├── lib/totp-auth/          # TOTP 子功能模块（生成/验证/限速/JWT，零依赖）
 │   ├── index.js            # createTotpAuth() 工厂
 │   └── lib/totp.js         # TOTP 算法（HMAC-SHA1/Base32/±1 步）
 │       lib/rate-limit.js   # 按 IP 阶梯限速
 │       lib/jwt.js          # JWT（HS256，可选）
-└── totp-secret.json        # TOTP secret（本地保存，不入库）
+├── clients.example.json    # 客户端注册表示例
+├── totp-secret.json        # TOTP secret（本地保存，不入库）
+└── oidc-keys.json          # OIDC ES256 私钥（本地保存，不入库）
 ```
