@@ -222,11 +222,14 @@ async function registerSessionMeta(token, req) {
   resolveLocation(hashKey, ip); // 异步，不 await
 }
 
-// 撤销单个会话：删 token + 移出索引 + 删元数据（logout / 设备删除 / 同设备去重共用）
+// 撤销单个会话：删 token + 移出索引 + 删元数据（logout / 设备删除 / 同设备去重共用）。
+// 同时彻底撤销关联的首方 SSO 令牌（共享 cookie）：登出后 cookie 不许再用满 TTL。
 async function revokeSession(token) {
   await redis.del(token);
   await redis.srem(SESSION_INDEX_KEY, token);
   await redis.del(sessionHashKey(token));
+  // oidc 在下方才创建；此处运行期取值，避免初始化顺序问题
+  if (oidc && oidc.revokeSsoForToken) await oidc.revokeSsoForToken(token);
 }
 
 // 设备指纹去重：登录成功后仅保留最新一次会话。
@@ -504,6 +507,13 @@ app.get('/api/verify', async (req, res) => {
   try {
     const user = await redis.get(token);
     if (!user) {
+      // 首方 SSO 令牌（共享 cookie 的 43 字符串）：兼容识别，命中同样返回 200 + X-Auth-User。
+      // 普通会话路径（上方）语义不变；此处仅在会话未命中后追加。
+      const sso = oidc && oidc.verifySsoToken ? await oidc.verifySsoToken(token) : null;
+      if (sso) {
+        res.setHeader('X-Auth-User', sso.sub);
+        return res.json({ ok: true, user: sso.sub, exp: sso.exp });
+      }
       // 会话未命中：追加查接口令牌（固定过期、不滑动续期、不 touchSession）
       const api = await verifyApiToken(token);
       if (!api) {
