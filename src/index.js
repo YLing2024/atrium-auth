@@ -398,35 +398,45 @@ function otpauthUriFor(secret) {
   return `otpauth://totp/${label}:${label}?secret=${secret}&issuer=${label}&period=30&digits=6&algorithm=SHA1`;
 }
 
+// 两阶段重置的**唯一实现**：对外端点（会话鉴权）与内部端点（内部令牌鉴权）共用，避免语义分叉。
+// 安全红线：reset 只写 pending、绝不覆盖正式 secret；confirm 必须 pending 验证码通过才转正。
+function performTotpReset() {
+  const secret = base32Encode(crypto.randomBytes(20));
+  savePending(secret);
+  return { status: 200, body: { secret, otpauthUri: otpauthUriFor(secret), expiresIn: 300 } };
+}
+
+function performTotpConfirm(rawCode) {
+  const pending = loadPending();
+  if (!pending) {
+    return { status: 400, body: { code: 'no_pending', message: '没有待确认的 TOTP 重置' } };
+  }
+  const code = String(rawCode == null ? '' : rawCode).trim();
+  if (!auth.verifyCode(pending.secret, code)) {
+    deletePending(); // 失败即作废 pending，保持旧正式 secret
+    return { status: 400, body: { code: 'invalid_code', message: '验证码错误' } };
+  }
+  saveFormalSecret(pending.secret);
+  deletePending();
+  return { status: 200, body: { ok: true } };
+}
+
+const totpUnauthorized = () => ({ code: 'unauthorized', message: '未登录或会话已过期' });
+
 // POST /api/totp/reset —— 需登录；生成新 secret 存 pending，不覆盖正式 secret（旧码仍可登录）
 app.post('/api/totp/reset', async (req, res) => {
   const user = await requireSession(req);
-  if (!user) {
-    return res.status(401).json({ code: 'unauthorized', message: '未登录或会话已过期' });
-  }
-  const secret = base32Encode(crypto.randomBytes(20));
-  savePending(secret);
-  return res.json({ secret, otpauthUri: otpauthUriFor(secret), expiresIn: 300 });
+  if (!user) return res.status(401).json(totpUnauthorized());
+  const r = performTotpReset();
+  return res.status(r.status).json(r.body);
 });
 
 // POST /api/totp/confirm —— 需登录；pending 验证码通过（±1 步）→ 转正写正式 secret 并删 pending
 app.post('/api/totp/confirm', async (req, res) => {
   const user = await requireSession(req);
-  if (!user) {
-    return res.status(401).json({ code: 'unauthorized', message: '未登录或会话已过期' });
-  }
-  const pending = loadPending();
-  if (!pending) {
-    return res.status(400).json({ code: 'no_pending', message: '没有待确认的 TOTP 重置' });
-  }
-  const code = String((req.body && req.body.code) || '').trim();
-  if (!auth.verifyCode(pending.secret, code)) {
-    deletePending(); // 失败即作废 pending，保持旧正式 secret
-    return res.status(400).json({ code: 'invalid_code', message: '验证码错误' });
-  }
-  saveFormalSecret(pending.secret);
-  deletePending();
-  return res.json({ ok: true });
+  if (!user) return res.status(401).json(totpUnauthorized());
+  const r = performTotpConfirm(req.body && req.body.code);
+  return res.status(r.status).json(r.body);
 });
 
 // POST /api/totp/setup —— 复用 auth.router（首次设置引导），限速/TOTP 逻辑不变
@@ -862,6 +872,38 @@ app.delete('/api/internal/sessions/:id', async (req, res) => {
     console.error(`[auth-server] internal sessions delete error: ${e.message}`);
     return res.status(500).json({ code: 'server_error', message: '删除会话失败' });
   }
+});
+
+// 内部 TOTP 重置：身份由可信本机服务经 ?sub= 断言，不走 requireSession。
+// 与对外端点共用 performTotpReset / performTotpConfirm —— 两阶段语义完全一致，绝不复刻实现。
+// 单用户实例：sub 必须存在且等于本实例用户，否则不处理。
+function internalTotpSub(req, res) {
+  const sub = internalSub(req);
+  if (!sub) {
+    res.status(400).json({ code: 'invalid_sub', message: '缺少 sub 参数' });
+    return false;
+  }
+  if (normalizeSubject(sub) !== SSO_SUBJECT) {
+    res.status(404).json({ code: 'not_found', message: '用户不存在' });
+    return false;
+  }
+  return true;
+}
+
+// POST /api/internal/totp/reset?sub=<用户名> —— 生成 pending secret，返回结构与 /api/totp/reset 一致
+app.post('/api/internal/totp/reset', (req, res) => {
+  if (!internalAuthOk(req, res)) return;
+  if (!internalTotpSub(req, res)) return;
+  const r = performTotpReset();
+  return res.status(r.status).json(r.body);
+});
+
+// POST /api/internal/totp/confirm?sub=<用户名> —— body {code}，结构与 /api/totp/confirm 一致
+app.post('/api/internal/totp/confirm', (req, res) => {
+  if (!internalAuthOk(req, res)) return;
+  if (!internalTotpSub(req, res)) return;
+  const r = performTotpConfirm(req.body && req.body.code);
+  return res.status(r.status).json(r.body);
 });
 
 /* ============ OIDC Provider（OAuth 2.1 + OIDC Core 1.0） ============ */
