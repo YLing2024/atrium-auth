@@ -13,7 +13,18 @@ const { createOidcProvider } = require('./oidc');
 
 const PORT = Number(process.env.PORT || 3200);
 const HOST = process.env.HOST || '0.0.0.0';
-const ISSUER = 'HomeAuth'; // 会话用户标签（历史命名，非 OIDC issuer）
+// 会话身份（稳定 subject / 展示名）。与 OIDC issuer（下方 OIDC_ISSUER）是两个概念，勿混用：
+// 这里标识"人是谁"，OIDC_ISSUER 标识"认证中心是谁"。
+// 历史常量 ISSUER='HomeAuth' 只是 cookie 名 / 会话标签，不是用户身份，已废弃。
+const SSO_SUBJECT = process.env.SSO_SUBJECT || 'linden';
+const SSO_DISPLAY_NAME = process.env.SSO_DISPLAY_NAME || SSO_SUBJECT;
+// 历史上 Redis 会话值 / 已签发记录里可能残留的旧标签，读取时统一归一化为 SSO_SUBJECT
+const LEGACY_SUBJECTS = new Set(['HomeAuth']);
+// 读取侧归一化：旧会话/旧令牌在过期前返回 SSO_SUBJECT，保证两条身份通道一致
+function normalizeSubject(stored) {
+  if (!stored) return SSO_SUBJECT;
+  return LEGACY_SUBJECTS.has(String(stored)) ? SSO_SUBJECT : String(stored);
+}
 // 可测试性：密钥 / 注册表所在目录（默认项目根，保证现状不变）
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..');
 const SECRET_FILE = path.join(DATA_DIR, 'totp-secret.json');
@@ -39,7 +50,7 @@ const jwtSecret = loadOrCreateJwtSecret();
 
 const auth = createTotpAuth({
   secretFile: SECRET_FILE,
-  issuer: ISSUER,
+  issuer: SSO_DISPLAY_NAME,
   jwtSecret,
   rateLimit: { maxFailures: 5, lockout: [60, 300, 900] },
 });
@@ -209,7 +220,7 @@ async function registerSessionMeta(token, req) {
   const hashKey = sessionHashKey(token);
   await redis.sadd(SESSION_INDEX_KEY, token);
   await redis.hset(hashKey, {
-    user: ISSUER,
+    user: SSO_SUBJECT,
     deviceName,
     ip,
     location: '',
@@ -269,7 +280,7 @@ async function touchSession(token, req) {
       const ip = clientIp(req);
       await redis.sadd(SESSION_INDEX_KEY, token);
       await redis.hset(hashKey, {
-        user: ISSUER,
+        user: SSO_SUBJECT,
         deviceName: '',
         ip,
         location: '',
@@ -341,10 +352,10 @@ async function requireSession(req) {
   if (!token) return null;
   if (!redisAvailable()) return null;
   try {
-    const user = await redis.get(token);
-    if (!user) return null;
+    const stored = await redis.get(token);
+    if (!stored) return null;
     await redis.expire(token, SESSION_TTL);
-    return user;
+    return normalizeSubject(stored);
   } catch (err) {
     console.error(`[auth-server] session check error: ${err.message}`);
     return null;
@@ -352,7 +363,7 @@ async function requireSession(req) {
 }
 
 function otpauthUriFor(secret) {
-  const label = encodeURIComponent(ISSUER);
+  const label = encodeURIComponent(SSO_DISPLAY_NAME);
   return `otpauth://totp/${label}:${label}?secret=${secret}&issuer=${label}&period=30&digits=6&algorithm=SHA1`;
 }
 
@@ -425,7 +436,7 @@ app.post('/api/login', async (req, res) => {
 
   const token = crypto.randomBytes(32).toString('hex');
   try {
-    await redis.set(token, ISSUER, 'EX', SESSION_TTL);
+    await redis.set(token, SSO_SUBJECT, 'EX', SESSION_TTL);
     await registerSessionMeta(token, req); // 登记设备会话元数据（地理位置异步，不阻塞）
     try {
       await dedupSameDeviceSessions(token, req); // 撤销同设备指纹旧会话（失败不影响登录）
@@ -505,14 +516,15 @@ app.get('/api/verify', async (req, res) => {
     return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
   }
   try {
-    const user = await redis.get(token);
-    if (!user) {
+    const stored = await redis.get(token);
+    if (!stored) {
       // 首方 SSO 令牌（共享 cookie 的 43 字符串）：兼容识别，命中同样返回 200 + X-Auth-User。
       // 普通会话路径（上方）语义不变；此处仅在会话未命中后追加。
       const sso = oidc && oidc.verifySsoToken ? await oidc.verifySsoToken(token) : null;
       if (sso) {
-        res.setHeader('X-Auth-User', sso.sub);
-        return res.json({ ok: true, user: sso.sub, exp: sso.exp });
+        const ssoUser = normalizeSubject(sso.sub);
+        res.setHeader('X-Auth-User', ssoUser);
+        return res.json({ ok: true, user: ssoUser, exp: sso.exp });
       }
       // 会话未命中：追加查接口令牌（固定过期、不滑动续期、不 touchSession）
       const api = await verifyApiToken(token);
@@ -529,6 +541,7 @@ app.get('/api/verify', async (req, res) => {
     touchSession(token, req); // 节流更新最近活跃 + 历史会话补建元数据（不阻塞响应）
     const ttl = await redis.ttl(token);
     const exp = Math.floor(Date.now() / 1000) + Math.max(0, ttl);
+    const user = normalizeSubject(stored); // 旧 Redis 值 'HomeAuth' 归一化为稳定 subject
     res.setHeader("X-Auth-User", user);
     return res.json({ ok: true, user, exp });
   } catch (err) {
@@ -663,7 +676,7 @@ app.put('/api/sessions/:id/name', async (req, res) => {
       const ip = clientIp(req);
       await redis.sadd(SESSION_INDEX_KEY, id);
       await redis.hset(hashKey, {
-        user: ISSUER,
+        user: SSO_SUBJECT,
         deviceName: '',
         ip,
         location: '',
@@ -711,6 +724,9 @@ const oidc = createOidcProvider({
   redisAvailable,
   dataDir: DATA_DIR,
   issuer: OIDC_ISSUER,
+  subject: SSO_SUBJECT,
+  displayName: SSO_DISPLAY_NAME,
+  legacySubjects: [...LEGACY_SUBJECTS],
   loginPagePath: path.join(__dirname, '..', 'public', 'index.html'),
   sessionTtl: SESSION_TTL,
 });

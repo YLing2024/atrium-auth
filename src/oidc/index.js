@@ -41,6 +41,9 @@ const SSO_SESSION_INDEX_PREFIX = 'oidc:sso-session:';
  * @param {() => boolean} opts.redisAvailable
  * @param {string} opts.dataDir
  * @param {string} opts.issuer
+ * @param {string} [opts.subject] 稳定用户标识（sub / preferred_username），默认 linden
+ * @param {string} [opts.displayName] 展示名（name），默认 = subject
+ * @param {string[]} [opts.legacySubjects] 历史遗留标签，读取时归一化为 subject
  * @param {{getSecret:Function, verifyCode:Function}} opts.auth
  * @param {{status:Function, recordFailure:Function, recordSuccess:Function}} opts.loginLimiter
  * @param {string} opts.loginPagePath
@@ -51,6 +54,15 @@ function createOidcProvider(opts) {
   const redis = opts.redis;
   const redisAvailable = opts.redisAvailable || (() => false);
   const issuer = String(opts.issuer || 'http://127.0.0.1:3200').replace(/\/+$/, '');
+  // 稳定身份：sub / preferred_username = subject；name = displayName。displayName 缺省回退 subject。
+  const subject = String(opts.subject || 'linden');
+  const displayName = String(opts.displayName || subject);
+  // 历史遗留标签（如 cookie 名 'HomeAuth'）读取时归一化，保证新旧令牌/会话身份一致
+  const legacySubjects = new Set(Array.isArray(opts.legacySubjects) ? opts.legacySubjects : []);
+  const normalizeSub = (s) => {
+    if (!s) return subject;
+    return legacySubjects.has(String(s)) ? subject : String(s);
+  };
   const dataDir = opts.dataDir;
   const loginPagePath = opts.loginPagePath;
   const sessionTtl = Number(opts.sessionTtl || 7 * 86400);
@@ -157,24 +169,24 @@ function createOidcProvider(opts) {
   async function validateToken(tok) {
     if (!tok || !redisAvailable()) return null;
     try {
-      // 1) 旧登录会话（原始 Redis key）
+      // 1) 旧登录会话（原始 Redis key）；历史值可能是旧标签，统一归一化身份
       const user = await redis.get(tok);
       if (user) {
         await redis.expire(tok, sessionTtl);
-        return { sub: user, auth_time: now(), sid: sha256hex(tok).slice(0, 16), source: 'legacy' };
+        return { sub: normalizeSub(user), auth_time: now(), sid: sha256hex(tok).slice(0, 16), source: 'legacy' };
       }
       // 2) 首方 SSO 会话（哈希存储）
       const ssoRaw = await redis.get(SSO_PREFIX + sha256hex(tok));
       if (ssoRaw) {
         const s = JSON.parse(ssoRaw);
         await redis.expire(SSO_PREFIX + sha256hex(tok), sessionTtl);
-        return { sub: s.sub, auth_time: s.auth_time, sid: s.sid, source: 'sso' };
+        return { sub: normalizeSub(s.sub), auth_time: s.auth_time, sid: s.sid, source: 'sso' };
       }
       // 3) OIDC access_token
       const atRaw = await redis.get(AT_PREFIX + sha256hex(tok));
       if (atRaw) {
         const a = JSON.parse(atRaw);
-        return { sub: a.sub, auth_time: a.auth_time, sid: a.sid, source: 'access' };
+        return { sub: normalizeSub(a.sub), auth_time: a.auth_time, sid: a.sid, source: 'access' };
       }
     } catch (err) {
       console.error(`[oidc] session lookup error: ${err.message}`);
@@ -253,7 +265,7 @@ function createOidcProvider(opts) {
         await redis.expire(SSO_SESSION_INDEX_PREFIX + rec.session_hash, sessionTtl);
       }
       const ttl = await redis.ttl(key);
-      return { sub: rec.sub, exp: now() + Math.max(0, ttl) };
+      return { sub: normalizeSub(rec.sub), exp: now() + Math.max(0, ttl) };
     } catch (err) {
       console.error(`[oidc] sso verify error: ${err.message}`);
       return null;
@@ -311,7 +323,8 @@ function createOidcProvider(opts) {
       exp: t + ACCESS_TTL,
       iat: t,
       auth_time: auth_time || t,
-      preferred_username: sub,
+      preferred_username: subject,
+      name: displayName,
     };
     if (nonce) idClaims.nonce = nonce;
     if (sid) idClaims.sid = sid;
@@ -639,8 +652,8 @@ function createOidcProvider(opts) {
       res.setHeader('WWW-Authenticate', 'Bearer error="invalid_token"');
       return res.status(401).json({ error: 'invalid_token', error_description: 'access_token 无效或已过期' });
     }
-    const body = { sub: rec.sub, preferred_username: rec.sub };
-    if (String(rec.scope || '').split(/\s+/).includes('profile')) body.name = rec.sub;
+    const subj = normalizeSub(rec.sub);
+    const body = { sub: subj, preferred_username: subj, name: displayName };
     if (rec.sid) body.sid = rec.sid;
     res.setHeader('Cache-Control', 'no-store');
     return res.json(body);
@@ -663,7 +676,7 @@ function createOidcProvider(opts) {
         const a = JSON.parse(atRaw);
         return res.json({
           active: true,
-          sub: a.sub,
+          sub: normalizeSub(a.sub),
           scope: a.scope,
           client_id: a.client_id,
           exp: a.exp,
@@ -676,7 +689,7 @@ function createOidcProvider(opts) {
         if (r.used) return inactive();
         return res.json({
           active: true,
-          sub: r.sub,
+          sub: normalizeSub(r.sub),
           scope: r.scope,
           client_id: r.client_id,
           token_type: 'refresh_token',
@@ -687,7 +700,7 @@ function createOidcProvider(opts) {
         const s = JSON.parse(ssoRaw);
         return res.json({
           active: true,
-          sub: s.sub,
+          sub: normalizeSub(s.sub),
           scope: 'openid',
           client_id: s.client_id || undefined,
           token_type: 'sso_session',
@@ -696,7 +709,7 @@ function createOidcProvider(opts) {
       // 兼容：旧登录会话原始 token
       const user = await redis.get(token);
       if (user) {
-        return res.json({ active: true, sub: user, scope: 'openid', token_type: 'session' });
+        return res.json({ active: true, sub: normalizeSub(user), scope: 'openid', token_type: 'session' });
       }
     } catch (err) {
       console.error(`[oidc] introspect error: ${err.message}`);
