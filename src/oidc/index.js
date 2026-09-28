@@ -32,6 +32,8 @@ const AT_PREFIX = 'oidc:at:';
 const RT_PREFIX = 'oidc:rt:';
 const RTCHAIN_PREFIX = 'oidc:rtchain:';
 const SSO_PREFIX = 'oidc:sso:';
+// 来源会话哈希 → 关联 SSO 令牌哈希集合（登出/删设备时反向彻底撤销共享 cookie）
+const SSO_SESSION_INDEX_PREFIX = 'oidc:sso-session:';
 
 /**
  * @param {object} opts
@@ -197,18 +199,80 @@ function createOidcProvider(opts) {
 
   async function ensureSsoSession(session, client) {
     if (session.source === 'sso' && session.raw) {
-      await redis.expire(SSO_PREFIX + sha256hex(session.raw), sessionTtl);
+      const h = sha256hex(session.raw);
+      await redis.expire(SSO_PREFIX + h, sessionTtl);
+      try {
+        const raw = await redis.get(SSO_PREFIX + h);
+        const rec = raw ? JSON.parse(raw) : null;
+        if (rec && rec.session_hash) {
+          await redis.expire(SSO_SESSION_INDEX_PREFIX + rec.session_hash, sessionTtl);
+        }
+      } catch (e) {
+        /* 索引续期失败不影响 SSO 本身 */
+      }
       return session.raw;
     }
     const token = randomToken(32);
+    const h = sha256hex(token);
     const rec = {
       sub: session.sub,
       auth_time: session.auth_time || now(),
-      sid: session.sid || sha256hex(token).slice(0, 16),
+      sid: session.sid || h.slice(0, 16),
       client_id: client.client_id,
     };
-    await redis.set(SSO_PREFIX + sha256hex(token), JSON.stringify(rec), 'EX', sessionTtl);
+    // 记录来源会话（旧登录会话 token 的哈希），以便 /api/logout、删除设备、同设备去重
+    // 能连同这个共享 cookie 的 SSO 令牌一起撤销（否则登出后 cookie 还能用满 TTL）。
+    const sessionHash = session.source === 'legacy' && session.raw ? sha256hex(session.raw) : '';
+    if (sessionHash) rec.session_hash = sessionHash;
+    await redis.set(SSO_PREFIX + h, JSON.stringify(rec), 'EX', sessionTtl);
+    if (sessionHash) {
+      const idxKey = SSO_SESSION_INDEX_PREFIX + sessionHash;
+      await redis.sadd(idxKey, h);
+      await redis.expire(idxKey, sessionTtl);
+    }
     return token;
+  }
+
+  // 供 /api/verify 兼容识别首方共享 cookie 的 SSO 令牌：命中刷新滑动 TTL，返回身份。
+  async function verifySsoToken(token) {
+    if (!token || !redisAvailable()) return null;
+    try {
+      const h = sha256hex(token);
+      const key = SSO_PREFIX + h;
+      const raw = await redis.get(key);
+      if (!raw) return null;
+      let rec;
+      try {
+        rec = JSON.parse(raw);
+      } catch {
+        return null;
+      }
+      if (!rec || !rec.sub) return null;
+      await redis.expire(key, sessionTtl);
+      if (rec.session_hash) {
+        await redis.expire(SSO_SESSION_INDEX_PREFIX + rec.session_hash, sessionTtl);
+      }
+      const ttl = await redis.ttl(key);
+      return { sub: rec.sub, exp: now() + Math.max(0, ttl) };
+    } catch (err) {
+      console.error(`[oidc] sso verify error: ${err.message}`);
+      return null;
+    }
+  }
+
+  // 彻底撤销：token 可能本身就是 SSO 令牌，也可能是与 SSO 关联的来源会话 token。
+  async function revokeSsoForToken(token) {
+    if (!token || !redisAvailable()) return;
+    try {
+      const h = sha256hex(token);
+      await redis.del(SSO_PREFIX + h);
+      const idxKey = SSO_SESSION_INDEX_PREFIX + h;
+      const members = await redis.smembers(idxKey);
+      if (members.length) await redis.del(...members.map((m) => SSO_PREFIX + m));
+      await redis.del(idxKey);
+    } catch (err) {
+      console.error(`[oidc] sso revoke error: ${err.message}`);
+    }
   }
 
   function cookieHeader(value, maxAge, domain) {
@@ -667,7 +731,7 @@ function createOidcProvider(opts) {
           }
           await revokeChain(chain);
         }
-        await redis.del(SSO_PREFIX + h);
+        await revokeSsoForToken(token);
         await redis.del(token); // 旧会话
       } catch (err) {
         console.error(`[oidc] revoke error: ${err.message}`);
@@ -695,13 +759,9 @@ function createOidcProvider(opts) {
       }
     }
 
-    // 撤销当前 SSO 会话
-    if (cookieToken && redisAvailable()) {
-      try {
-        await redis.del(SSO_PREFIX + sha256hex(cookieToken));
-      } catch (e) {
-        /* ignore */
-      }
+    // 撤销当前 SSO 会话（同时清掉来源会话的反向索引）
+    if (cookieToken) {
+      await revokeSsoForToken(cookieToken);
     }
     clearSsoCookie(res, hintDomain);
 
@@ -767,6 +827,9 @@ function createOidcProvider(opts) {
     keyStore,
     registry,
     discovery,
+    // 供 /api/verify 与 revokeSession 复用（SSO 令牌双向兼容 / 彻底撤销）
+    verifySsoToken,
+    revokeSsoForToken,
     // 供测试/诊断
     _internal: { exchangeCode, resolveSession, validateToken, issueTokens },
   };
