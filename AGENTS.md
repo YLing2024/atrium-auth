@@ -74,9 +74,14 @@ journalctl -u auth-server -n 100 --no-pager
 | GET | `/api/internal/sessions?sub=` | `X-Internal-Token` | **内部**：按 `sub` 定位用户的设备会话列表（结构同 `/api/sessions`），供本机服务调用 |
 | PUT | `/api/internal/sessions/:id/name` | `X-Internal-Token` | **内部**：重命名会话 |
 | DELETE | `/api/internal/sessions/:id` | `X-Internal-Token` | **内部**：踢下线 |
+| POST | `/api/internal/totp/reset?sub=` | `X-Internal-Token` | **内部**：两阶段重置①，与 `/api/totp/reset` **共用同一实现**，结构一致 |
+| POST | `/api/internal/totp/confirm?sub=` | `X-Internal-Token` | **内部**：两阶段重置② body `{code}`，与 `/api/totp/confirm` **共用同一实现** |
 
 > `/api/internal/*` 只认共享内部令牌（`X-Internal-Token`），**不走 `requireSession`**：任何客户端凭证（cookie / Bearer JWT / 会话 token）都无效。
 > 令牌首次启动自动生成到 `INTERNAL_TOKEN_FILE`（默认 `<DATA_DIR>/internal-token`，0600），值绝不打印、不返回。
+> **两阶段重置红线**：`reset` 只写 pending、绝不覆盖正式 secret；`confirm` 必须 pending 验证码通过才转正。
+> 对外与内部端点共用 `performTotpReset` / `performTotpConfirm`，**禁止复刻实现**（防止语义分叉）。
+> 内部端点 `sub` 必须等于本实例 `SSO_SUBJECT`：缺 `sub`→400、非本实例用户→404。
 
 OIDC（根路径，issuer 取 `ISSUER` 环境变量）：
 

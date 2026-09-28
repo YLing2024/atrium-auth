@@ -48,10 +48,14 @@
 | GET | `/api/internal/sessions?sub=` | `X-Internal-Token` | **内部**（仅本机服务）：按 `sub` 返回设备会话列表，结构同 `/api/sessions` |
 | PUT | `/api/internal/sessions/:id/name` | `X-Internal-Token` | **内部**：重命名会话 |
 | DELETE | `/api/internal/sessions/:id` | `X-Internal-Token` | **内部**：踢下线 |
+| POST | `/api/internal/totp/reset?sub=` | `X-Internal-Token` | **内部**：两阶段重置①，与 `/api/totp/reset` 共用实现、结构一致 |
+| POST | `/api/internal/totp/confirm?sub=` | `X-Internal-Token` | **内部**：两阶段重置② body `{code}`，与 `/api/totp/confirm` 共用实现 |
 
 > `/api/internal/*` 是给本机服务（如 admin-server）调用的内部接口：只认共享令牌 `X-Internal-Token`，
 > **不接受**任何客户端凭证（cookie / Bearer JWT / 会话 token），也不走 `requireSession`。
 > 令牌首次启动自动生成到 `<DATA_DIR>/internal-token`（0600），可用 `INTERNAL_TOKEN_FILE` 指定路径。
+> **两阶段重置红线**：`reset` 只写 pending、绝不覆盖正式 secret；`confirm` 必须 pending 验证码通过才转正。
+> 对外与内部端点共用 `performTotpReset` / `performTotpConfirm`；内部 `sub` 必须等于本实例 `SSO_SUBJECT`（缺→400，非本实例用户→404）。
 
 ## OIDC Provider（标准接入，OAuth 2.1 + OIDC Core 1.0）
 
