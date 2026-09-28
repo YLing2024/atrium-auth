@@ -128,6 +128,7 @@ function createOidcProvider(opts) {
         'aud',
         'exp',
         'iat',
+        'jti',
         'auth_time',
         'nonce',
         'preferred_username',
@@ -308,7 +309,22 @@ function createOidcProvider(opts) {
     const t = now();
     const { sub, client, scope, nonce, auth_time, sid } = params;
 
-    const accessToken = randomToken(32);
+    // access_token 改为 ES256 JWT（与 id_token 同一密钥/kid；/jwks.json 已发布公钥）。
+    // 撤销语义不变：Redis 哈希记录才是「active」的唯一依据，JWT 只是表现形式。
+    const accessClaims = {
+      iss: issuer,
+      sub,
+      aud: client.client_id,
+      exp: t + ACCESS_TTL,
+      iat: t,
+      jti: randomToken(16),
+      sid: sid || '',
+      scope: scope || 'openid',
+      client_id: client.client_id,
+    };
+    const accessToken = keyStore.signJwt(accessClaims);
+    // 仍按哈希存 Redis：/userinfo、/introspect、/revoke 及撤销判定全部以此为准。
+    // 兼容：旧式不透明 access_token 记录（randomToken）格式相同，过期前照旧可用。
     await redis.set(
       AT_PREFIX + sha256hex(accessToken),
       JSON.stringify({ sub, client_id: client.client_id, scope, sid, auth_time, exp: t + ACCESS_TTL }),
