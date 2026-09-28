@@ -1,26 +1,27 @@
-# HomeAuth — 认证中心（单点登录 SSO）
+# 认证中心（SSO / OIDC Provider）
 
-统一认证系统：**TOTP 动态验证码登录 + Redis 滑动过期会话 + Nginx 探针统一鉴权**。
-任何子站（Admin / 博客后台 / 其他服务）通过 Nginx `auth_request` 接入，后端零鉴权代码。
+统一认证系统：**TOTP 动态验证码登录 + Redis 滑动过期会话 + 标准 OIDC Provider**。
+业务站的登录态由 **Auth Gateway**（独立项目）统一接管：网关走 OIDC 完成登录、维护站点 cookie、
+向后端注入 `X-Auth-User`；业务项目零鉴权代码。认证中心本身只管认证与令牌签发/吊销。
 
 ## 架构
 
 ```
-┌──────────────┐   ①请求    ┌──────────────────────────────┐
-│   浏览器      │ ─────────→ │  Nginx（auth_request 探针）    │
-└──────────────┘ ←───────── │  验 token：有效才转发           │
-   ②响应        └───────┬──────────────────────────────┘
-                        │ ③内部子请求（/auth-check）
-                        ▼
-              ┌────────────────────────┐
-              │  HomeAuth 认证中心 :3200 │
-              │  TOTP 验证 / Redis 会话  │
-              └─────────┬──────────────┘
-                        │ ④有效 → 2xx（注入 X-Auth-User）
-                        ▼
-              ┌────────────────────────┐
-              │  子站应用（零鉴权代码）   │
-              └────────────────────────┘
+┌──────────┐  ①请求   ┌───────────────────────────┐
+│  浏览器   │ ───────→ │ 站点 nginx（TLS + 路由）    │
+└──────────┘          └────────────┬──────────────┘
+                                   │ ②全部转 127.0.0.1:18920
+                                   ▼
+                        ┌──────────────────────────┐
+                        │ Auth Gateway（Go 单二进制）│
+                        │ 登录态 / cookie / 注入身份  │
+                        └──────┬────────────┬───────┘
+                   ③OIDC 授权    │            │ ④注入 X-Auth-User
+                                ▼            ▼
+                    ┌────────────────┐  ┌────────────────┐
+                    │ 认证中心 :3200  │  │ 业务项目        │
+                    │ TOTP / Redis   │  │ （零鉴权代码）   │
+                    └────────────────┘  └────────────────┘
 ```
 
 ## 核心能力
@@ -29,9 +30,9 @@
 |---|---|
 | **TOTP 动态验证码** | 登录凭据 = 6 位动态码（30 秒变化，±1 步容忍），无账号无静态密码 |
 | **Redis 滑动过期会话** | token 存 Redis，每次验证刷新 TTL，N 天不登录自动过期（默认 7 天） |
-| **中心化验证** | 子站调 `/api/verify` 验证 token（Nginx 探针或应用层） |
+| **标准 OIDC Provider** | `/authorize` `/token` `/userinfo` `/jwks.json` 等标准端点，供 Auth Gateway 接入 |
 | **按 IP 阶梯限速** | 5 次失败锁 60s → 300s → 900s（防暴力破解） |
-| **单点登录** | 一个登录页管所有子站，登录后回跳带 token |
+| **统一登录** | 一个登录页管所有站点；登录态由 Auth Gateway 维持，业务站不再各自存 token |
 
 ## 接口
 
@@ -39,7 +40,7 @@
 |---|---|---|---|
 | GET | `/auth` | 无 | 登录页（TOTP 验证码输入，`?redirect=` 登录后回跳） |
 | POST | `/api/login` | 无 | body `{code}` → 验证 TOTP → 签发 token（存 Redis） |
-| GET | `/api/verify` | 无 | `?token=` 或 `Authorization: Bearer` → 验证 + 刷新 TTL，通过返回 `X-Auth-User` header |
+| GET | `/api/verify` | 无 | **兼容保留**（网关不再走它）：`?token=` / `X-Auth-Token` / Bearer → 验证 + 刷新 TTL，通过返回 `X-Auth-User` header |
 | POST | `/api/logout` | 无 | body `{token}` → 删除 Redis 会话 |
 | POST | `/api/totp/setup` | 无（仅首启） | 生成 TOTP secret，返回 `{secret, otpauthUri}` |
 | POST | `/api/totp/reset` | Bearer（已登录） | **两阶段重置①**：生成新 secret 存 pending（5 分钟），**不覆盖正式**，返回 `{secret, otpauthUri, expiresIn}` |
@@ -62,11 +63,13 @@ TOTP 仍是唯一的用户验证手段；标准只规范流程。issuer 取环�
 | GET | `/auth` | 登录页（`?redirect=` 旧流程保留，白名单 + `Deprecated` 标记） |
 
 - **redirect_uri 精确匹配**：只接受注册表里完全相等的字符串，堵开放重定向 / token 外泄。
+- **access_token 也是 ES256 JWT**（claims 含 `iss`/`sub`/`aud`/`exp`/`iat`/`jti`/`sid`/`scope`/`client_id`），任何消费方可本地验签；**撤销仍以本服务的 Redis 记录为准**（`/introspect`、`/revoke` 生效），旧式不透明 token 过期前继续可用。
 - **id_token 只用 ES256**（P-256，`kid`=JWK thumbprint）；密钥首次启动生成 `<DATA_DIR>/oidc-keys.json`（0600）。
+- **身份取值**：`sub`/`preferred_username` 取 `SSO_SUBJECT`（默认 `linden`），展示名 `name` 取 `SSO_DISPLAY_NAME`（默认同值）；`/api/verify` 的 `X-Auth-User` 与之一致。
 - **首方模式**（`"first_party": true`）：auth-server 自己完成 code→token，`Set-Cookie`（HttpOnly/SameSite=Lax/`Domain` 取 `cookie_domain`）后 302 回跳，子站前端零 SSO 代码。
 - 客户端注册表：`clients.json`（0600，gitignore），格式见 `clients.example.json`；非法条目（空 redirect_uris / 含 `*` / 非 http(s)）加载时跳过。
 
-> nginx 现状只把 `/api/` 反代到本服务；OIDC 端点挂在根路径，投产前需在 nginx 增加对应 location（本次改造不含配置改动）。
+> 业务站登录态由 Auth Gateway 接管（站点 nginx 只做 TLS + 路由，`/_auth/*` 转网关）；OIDC 端点在服务端（loopback）被网关调用，不需要给业务站 nginx 暴露。
 
 ## TOTP 重置流程（标准两阶段）
 
@@ -78,30 +81,17 @@ TOTP 仍是唯一的用户验证手段；标准只规范流程。issuer 取环�
    · 失败/取消 → pending 丢弃，旧 secret 不受影响
 ```
 
-## 子站接入（Nginx 探针，后端零代码）
+## 业务站接入（Auth Gateway）
 
-```nginx
-# 子站受保护 API：探针验证 + 注入 X-Auth-User
-location /api/admin/ {
-    auth_request /auth-check;
-    auth_request_set $auth_user $upstream_http_x_auth_user;
-    proxy_pass http://127.0.0.1:<子站端口>;
-    proxy_set_header X-Auth-User $auth_user;
-}
+业务项目**零鉴权代码**：登录、TOTP、token、会话全部在网关与认证中心完成。
 
-# 探针（内部）
-location = /auth-check {
-    internal;
-    proxy_pass http://127.0.0.1:3200/api/verify;
-    proxy_pass_request_body off;
-    proxy_set_header Authorization $http_authorization;
-}
-```
+1. **后端**：从请求头 `X-Auth-User` 读身份（网关注入，会先剥掉客户端伪造的同名头）；头缺失返回 **401**。
+2. **前端**：任何 API 返回 401 → 整页跳 `/_auth/login?next=<当前地址>`；不要 `localStorage` 存 token。
+3. **站点 nginx**：需要登录的 location `proxy_pass http://127.0.0.1:18920`（网关），不再有
+   `auth_request` / `/auth-check` / `?token=`。
+4. 站点会话 cookie 为 `__Host-<app>_session`（每个站一份，不跨子域共享）。
 
-**前端 SSO 客户端**（登录跳转 + token 存取，约 30 行）：
-1. 无 token → 跳 `https://auth.example.com/auth?redirect=<本站地址>`
-2. 回跳解析 token（`?token=`）→ 存 localStorage
-3. 请求带 `Authorization: Bearer <token>`；401 → 清 token → 再跳认证中心
+> `/api/verify` 与 nginx `auth_request` 探针属**兼容保留**，新接入不要再使用。
 
 ## 部署
 
