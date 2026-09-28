@@ -62,7 +62,7 @@ journalctl -u auth-server -n 100 --no-pager
 |---|---|---|---|
 | GET | `/auth` | 无 | 登录页（`?redirect=` 登录后回跳） |
 | POST | `/api/login` | 无 | `{code}` → 验 TOTP → 签发 token 存 Redis |
-| GET | `/api/verify` | 无 | `?token=` 或 Bearer → 验证 + 刷新 TTL，通过返回 `X-Auth-User` |
+| GET | `/api/verify` | 无 | `?token=` / `X-Auth-Token` / Bearer → 会话令牌**或首方 SSO 令牌**验证 + 刷新 TTL，通过返回 `X-Auth-User` |
 | POST | `/api/logout` | 无 | `{token}` → 删会话 |
 | POST | `/api/totp/setup` | 无（仅首启） | 生成 secret，返回 `{secret, otpauthUri}` |
 | POST | `/api/totp/reset` | Bearer | 两阶段①：生成 pending secret（5 分钟），不覆盖正式 |
@@ -123,6 +123,7 @@ app.use(oidc.router)           ← OIDC 路由挂根路径（/authorize /token .
 - **`/auth-check` 探针的 query token 会丢**：nginx `auth_request` 子请求默认不带原始 query，主域配置里已手动把父请求 args 拼回（见 `homepage.conf` 的 `/auth-check` 块）。别的域名接探针时要照抄这段，否则 `?token=` 场景全部 401。
 - **OIDC 端点挂在根路径**（`/authorize` `/token` `/jwks.json` …），而 nginx 目前只反代 `/api/`；投产前必须在 nginx 加对应 location（本次改造不含配置改动）。
 - **首方客户端（`first_party:true`）不强制 PKCE**：auth-server 自己完成 code→token，code 不落浏览器；普通公开客户端仍强制 S256。
+- **首方 SSO 令牌与会话的关联**：`ensureSsoSession` 建的记录含 `session_hash`（来源会话 token 哈希），并写反向索引 `oidc:sso-session:<会话哈希>` → SSO 令牌哈希集合。`/api/logout`、`DELETE /api/sessions/:id`、同设备去重共用 `revokeSession`，会连带删除 `oidc:sso:<哈希>`（登出后共享 cookie 立即失效，不用满 7 天）。改 `revokeSession` 或 `ensureSsoSession` 时必须保持这对关联。
 - `proxy_method GET` + 清空 `Content-Length`/`Content-Type` 是必须的：否则带 body 的 PUT/POST 会被探针挂起直到 504。
 - Redis 挂了等于全站登不上；排查顺序：`systemctl status redis-server` → `redis-cli ping`。
 - 单文件无热重载，改完必须重启。

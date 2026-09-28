@@ -189,3 +189,42 @@ node run-tests.js && node run-extra.js
 ```
 
 生产启用步骤（本次未执行，交由验收方）：在 `DATA_DIR` 放置 `clients.json`（参考 `clients.example.json`，0600），设 `ISSUER=https://<auth 域>`，nginx 增加 OIDC 端点反代，重启 `auth-server.service`。
+
+## 9. 第三轮修复（2026-09-28）：SSO 令牌 verify 兼容 + 登出彻底撤销
+
+**根因**：首方模式 `/authorize` 下发的共享 cookie（`HomeAuth=<43 字符 SSO 令牌>`）在 `/introspect` 认、但 `/api/verify` 不认（探针 401 → 登录成功仍弹回登录页）；且 `revokeSession` 只删会话，不删关联 SSO 令牌（登出后 cookie 可用满 7 天）。
+
+**改动**（2 个提交，未 push）：
+
+- `1c6b024 feat(oidc): ...`：`ensureSsoSession` 在 SSO 记录里存 `session_hash`（来源会话 token 的 sha256），并写反向索引 `oidc:sso-session:<会话哈希>` → SSO 令牌哈希集合；新增 `verifySsoToken` / `revokeSsoForToken`；`/revoke`、`/end_session` 复用 `revokeSsoForToken`。
+- `f82b4c0 fix(api): ...`：`/api/verify` 在原始会话未命中后追加识别 SSO 令牌（同样 200 + `X-Auth-User`，滑动续期；原始会话路径一行未改）；`revokeSession` 末尾调用 `oidc.revokeSsoForToken(token)`，使 `/api/logout`、`DELETE /api/sessions/:id`、同设备去重都连带撤销 SSO。
+
+**前 / 后（原始 curl，测试实例 `127.0.0.1:13200` / `REDIS_DB=15` / 临时 `DATA_DIR`）**：
+
+修复前：
+```
+GET /api/verify (X-Auth-Token: <43字符SSO>) → 401 {"code":"invalid_token",...}
+下线后 POST /introspect <SSO> → {"active":true,...,"token_type":"sso_session"}   ← 仍可用，安全洞
+```
+修复后：
+```
+GET /api/verify (X-Auth-Token: <43字符SSO>) → 200  X-Auth-User: HomeAuth  {"ok":true,"user":"HomeAuth","exp":...}
+GET /api/verify (X-Auth-Token: <会话令牌>) → 200  X-Auth-User: HomeAuth      ← 回归不变
+POST /introspect <SSO> (登出前) → {"active":true,...,"token_type":"sso_session"}
+POST /api/logout (Bearer 会话) → {"ok":true,"message":"Session revoked"}
+GET /api/verify (会话, 登出后) → 401
+GET /api/verify (SSO,  登出后) → 401
+POST /introspect <SSO> (登出后) → {"active":false}
+```
+
+**测试结果**（修复后重跑，全部通过）：
+
+| 套件 | 结果 |
+|---|---|
+| 自测 `repro.js`（verify 兼容 + 登出撤销） | PASS=8 FAIL=0 |
+| 自测 `revoke-paths.js`（删设备 / 同设备去重连带撤销） | PASS=3 FAIL=0 |
+| 既有 `run-extra.js`（首方/机密/end_session/revoke） | PASS=9 FAIL=0 |
+| 既有 `run-tests.js`（A/B/C 段，含 Redis 挂掉 refuse） | PASS=38 FAIL=0 |
+
+新增依赖 0；生产实例（`127.0.0.1:3200`，PID 1951039）全程未重启、未占用；临时实例与 13200/13202 端口、DB15 数据均已清理。
+
