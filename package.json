@@ -10,6 +10,6 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "ioredis": "^6.0.0",
+    "ioredis": "^6.0.0"
   }
 }
