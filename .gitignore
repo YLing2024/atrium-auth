@@ -3,6 +3,10 @@ totp-secret.json
 *.log
 totp-pending.json
 
+# OIDC 私密文件（本地，不入库）
+oidc-keys.json
+clients.json
+
 # 本机项目记忆（只存本地，不提交 / 不推送）
 PROJECT_MEMORY.md
 jwt-secret
