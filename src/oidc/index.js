@@ -365,7 +365,8 @@ function createOidcProvider(opts) {
         if (codeChallengeMethod !== 'S256') {
           return errorPage(res, 400, 'invalid_request', 'code_challenge_method 仅支持 S256');
         }
-      } else if (isPublic) {
+      } else if (isPublic && !client.first_party) {
+        // 首方客户端由 auth-server 自己完成 code→token，code 不落浏览器，无需 PKCE
         return errorPage(res, 400, 'invalid_request', '公开客户端必须携带 code_challenge (S256)');
       }
 
@@ -451,7 +452,7 @@ function createOidcProvider(opts) {
       if (!timingEqual(pkceChallenge(codeVerifier), rec.code_challenge)) {
         throw oauthErr('invalid_grant', 'PKCE 校验失败');
       }
-    } else if (!registry.isConfidential(client)) {
+    } else if (!registry.isConfidential(client) && !client.first_party) {
       throw oauthErr('invalid_grant', '公开客户端必须使用 PKCE');
     }
     return issueTokens({

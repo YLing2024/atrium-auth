@@ -30,6 +30,7 @@ function loadOrCreateJwtSecret() {
   if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
   if (fs.existsSync(JWT_SECRET_FILE)) return fs.readFileSync(JWT_SECRET_FILE, 'utf8').trim();
   const secret = crypto.randomBytes(32).toString('hex');
+  fs.mkdirSync(path.dirname(JWT_SECRET_FILE), { recursive: true });
   fs.writeFileSync(JWT_SECRET_FILE, secret, { mode: 0o600 });
   return secret;
 }
