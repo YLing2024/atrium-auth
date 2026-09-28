@@ -9,16 +9,22 @@ const Redis = require('ioredis');
 const { createTotpAuth } = require('../lib/totp-auth');
 const { base32Encode } = require('../lib/totp-auth/lib/totp');
 const { RateLimiter } = require('totp-auth/lib/rate-limit');
+const { createOidcProvider } = require('./oidc');
 
 const PORT = Number(process.env.PORT || 3200);
 const HOST = process.env.HOST || '0.0.0.0';
-const ISSUER = 'HomeAuth';
-const SECRET_FILE = path.join(__dirname, '..', 'totp-secret.json');
-const JWT_SECRET_FILE = path.join(__dirname, '..', 'jwt-secret');
+const ISSUER = 'HomeAuth'; // 会话用户标签（历史命名，非 OIDC issuer）
+// 可测试性：密钥 / 注册表所在目录（默认项目根，保证现状不变）
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..');
+const SECRET_FILE = path.join(DATA_DIR, 'totp-secret.json');
+const JWT_SECRET_FILE = path.join(DATA_DIR, 'jwt-secret');
 const SESSION_DAYS = Number(process.env.SESSION_DAYS || 7);
 const SESSION_TTL = SESSION_DAYS * 86400;
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1';
 const REDIS_PORT = Number(process.env.REDIS_PORT || 6379);
+const REDIS_DB = Number(process.env.REDIS_DB || 0);
+// OIDC issuer：一律取环境变量 ISSUER，默认本机 3200（不得硬编码真实域名）
+const OIDC_ISSUER = process.env.ISSUER || 'http://127.0.0.1:3200';
 
 function loadOrCreateJwtSecret() {
   if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
@@ -40,6 +46,7 @@ const auth = createTotpAuth({
 const redis = new Redis({
   host: REDIS_HOST,
   port: REDIS_PORT,
+  db: REDIS_DB,
   enableOfflineQueue: false,
   maxRetriesPerRequest: 2,
   retryStrategy: (times) => Math.min(times * 200, 3000),
@@ -48,7 +55,7 @@ const redis = new Redis({
 let redisReady = false;
 redis.on('ready', () => {
   redisReady = true;
-  console.log(`[auth-server] redis connected ${REDIS_HOST}:${REDIS_PORT} session_ttl=${SESSION_TTL}s`);
+  console.log(`[auth-server] redis connected ${REDIS_HOST}:${REDIS_PORT} db=${REDIS_DB} session_ttl=${SESSION_TTL}s`);
 });
 redis.on('error', (err) => {
   redisReady = false;
@@ -279,7 +286,7 @@ async function touchSession(token, req) {
 
 // pending 存储文件：{secret, expiresAt: now + 5min}。不覆盖正式 secret，
 // 正式 secret 在 confirm 成功前保持有效（旧验证码仍可登录）
-const PENDING_FILE = path.join(__dirname, '..', 'totp-pending.json');
+const PENDING_FILE = path.join(DATA_DIR, 'totp-pending.json');
 const PENDING_TTL_MS = 300 * 1000; // 5 分钟
 
 function loadPending() {
@@ -686,6 +693,18 @@ app.delete('/api/sessions/:id', async (req, res) => {
   }
 });
 
+/* ============ OIDC Provider（OAuth 2.1 + OIDC Core 1.0） ============ */
+
+const oidc = createOidcProvider({
+  redis,
+  redisAvailable,
+  dataDir: DATA_DIR,
+  issuer: OIDC_ISSUER,
+  loginPagePath: path.join(__dirname, '..', 'public', 'index.html'),
+  sessionTtl: SESSION_TTL,
+});
+app.use(oidc.router);
+
 app.listen(PORT, HOST, () => {
-  console.log(`[auth-server] listening on http://${HOST}:${PORT} issuer=${ISSUER}`);
+  console.log(`[auth-server] listening on http://${HOST}:${PORT} issuer=${OIDC_ISSUER} data_dir=${DATA_DIR}`);
 });
