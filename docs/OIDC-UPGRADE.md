@@ -91,7 +91,7 @@ preferred_username, sid(可选)
 - 签名用 ES256（P-256 ✓ `node:crypto` 直接支持 ✓）；**不得**再用 HS256 签 id_token ✗（HS256 是共享密钥，第三方无法安全验签 ✗）
 - 密钥对首次启动生成 → `oidc-keys.json`（0600 ✓ **gitignore** ✓）；`kid` = 公钥 JWK thumbprint ✓；支持多密钥并存（轮换用 ✓）
 
-**access_token**：不透明随机串 ✓（`node:crypto.randomBytes(32)` ✓ base64url ✓）→ Redis `oidc:at:<hash>` ✓ TTL **1 小时** ✓
+**access_token**：（历史：曾为不透明随机串 → Redis `oidc:at:<hash>`，TTL 1 小时）**现为 ES256 JWT，TTL 15 分钟**（`ACCESS_TTL_SEC` 可覆盖），撤销仍以 Redis 为准 ✓
 **refresh_token**：同法 ✓ Redis `oidc:rt:<hash>` ✓ TTL **30 天** ✓
 
 ## 5. 客户端注册表

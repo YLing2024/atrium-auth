@@ -22,7 +22,7 @@
 - `/authorize`：校验 client → **redirect_uri 字符串精确相等** → `response_type=code` → scope 含 `openid` → 公开客户端强制 PKCE S256（**首方客户端除外**，见 §6）；无会话则复用现有 TOTP 登录页；授权成功只回 `code`+`state`；`prompt=login`/`max_age` 可强制重新验证。
 - `/token`：`authorization_code`（code 60s、一次性、`getdel` 原子消费、绑定 client/redirect_uri/PKCE/nonce/sub/auth_time）、`refresh_token`（**轮换 + 重放整链作废**）；支持 `client_secret_basic`/`client_secret_post`/`none`。
 - id_token：**ES256 only**，含 `iss/sub/aud/exp/iat/auth_time/nonce/preferred_username/sid`。
-- access_token：不透明随机串，Redis `oidc:at:<sha256>` TTL 1h；refresh `oidc:rt:<sha256>` TTL 30d；SSO 会话 `oidc:sso:<sha256>` 滑动 7d。
+- access_token：（当轮）不透明随机串，Redis `oidc:at:<sha256>` TTL 1h；**现为 ES256 JWT，TTL 15 分钟**（`ACCESS_TTL_SEC` 可覆盖）；refresh `oidc:rt:<sha256>` TTL 30d；SSO 会话 `oidc:sso:<sha256>` 滑动 7d。
 - `/userinfo`：Bearer access_token，`{sub, preferred_username, name?, sid?}`，无效 401 + `WWW-Authenticate`。
 - `/introspect`：RFC 7662，识别 access/refresh/sso/旧会话 token，也接受 `Authorization: Bearer`。
 - `/end_session`：清 cookie；`post_logout_redirect_uri` 仅放行注册白名单，否则 400 不跳转。

@@ -4,6 +4,8 @@
 业务站的登录态由 **Auth Gateway**（独立项目）统一接管：网关走 OIDC 完成登录、维护站点 cookie、
 向后端注入 `X-Auth-User`；业务项目零鉴权代码。认证中心本身只管认证与令牌签发/吊销。
 
+> **令牌有效期**（现行）：**access_token：ES256 JWT，TTL 15 分钟**（`ACCESS_TTL_SEC` 可覆盖，下限 60 秒；Bearer 为本地验签，故把吊销后的暴露窗口压到 15 分钟）；refresh_token 30 天且每次续期轮转。
+
 ## 架构
 
 ```
