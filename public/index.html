@@ -115,10 +115,23 @@
   <div class="foot">HOME AUTH</div>
 </div>
 <script>
+// 回跳白名单：只允许本站相对路径，或自家域下的绝对地址。
+// 没有这道闸时，?redirect=https://任意域名 会在登录后把真实的 SSO 会话 token 拼在 URL 上送出去（开放重定向 + token 外泄）。
+function isAllowedRedirect(u) {
+  if (typeof u !== 'string' || !u) return false;
+  if (u.charAt(0) === '/') return u.charAt(1) !== '/' && u.charAt(1) !== '\\'; // 相对路径；拒绝 //evil.com 协议相对
+  var p;
+  try { p = new URL(u); } catch (e) { return false; }
+  if (p.protocol !== 'https:' && p.protocol !== 'http:') return false;
+  var h = p.hostname.toLowerCase();
+  if (h === 'localhost' || h === '127.0.0.1' || h === '[::1]') return true; // 本机调试
+  return /(^|\.)(zhangyunling\.cn|yling\.site)$/.test(h);
+}
 var REDIRECT = (function () {
   var raw = new URLSearchParams(location.search).get('redirect');
   raw = typeof raw === 'string' && raw ? raw : '/';
   if (!raw.startsWith('/') && !/^https?:\/\//i.test(raw)) return '/';
+  if (!isAllowedRedirect(raw)) return '/';
 
   var url;
   try {
