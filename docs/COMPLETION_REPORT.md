@@ -1,5 +1,7 @@
 # OIDC 改造完成报告（auth-server → OIDC Provider）
 
+> ⚠️ 已被 docs/SSO-GATEWAY-SPEC.md 取代（2026-09-28 起全站走 Auth Gateway）。本文仅存历史设计记录。
+
 > 施工图：`docs/OIDC-UPGRADE.md`。本报告诚实记录**做了什么 / 没做到什么 / 遗留风险**。
 > 日期：2026-09-28。改造期间生产实例（`127.0.0.1:3200` / systemd `auth-server`）全程未重启、未占用、未影响。
 

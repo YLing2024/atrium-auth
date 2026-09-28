@@ -1,5 +1,7 @@
 # auth-server → OIDC Provider 改造规格（权威施工图）
 
+> ⚠️ 已被 docs/SSO-GATEWAY-SPEC.md 取代（2026-09-28 起全站走 Auth Gateway）。本文仅存历史设计记录。
+
 > 目标：把现有自研 SSO 升级为**标准 OAuth 2.1 + OpenID Connect Core 1.0** 的 IdP。
 > **TOTP 保留为唯一的用户验证手段**（标准允许自定义认证方式，标准管的是流程）。
 > 与 `AGENTS.md` 冲突时以本文件为准（本文件是本次改造的施工图）。
