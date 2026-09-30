@@ -18,7 +18,7 @@
 ```bash
 npm install
 npm start            # = node src/index.ts，默认监听 0.0.0.0:3200
-npm run check        # node --check src/index.ts（语法检查）
+npm run check        # = tsc --noEmit（类型检查）
 ```
 
 需要本机 Redis（默认 `127.0.0.1:6379`）。首次启动会在 `DATA_DIR` 自动生成 `oidc-keys.json`、`jwt-secret`、`internal-token`。
