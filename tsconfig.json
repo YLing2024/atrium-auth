@@ -4,6 +4,7 @@
     "lib": ["ES2023"],
     "module": "commonjs",
     "moduleResolution": "node",
+    "moduleDetection": "force",
     "types": ["node"],
     "strict": true,
     "noEmit": true,
@@ -13,5 +14,5 @@
     "verbatimModuleSyntax": false,
     "allowJs": false
   },
-  "include": ["src", "lib/totp-auth/index.d.ts"]
+  "include": ["src", "test", "lib/totp-auth/index.d.ts"]
 }
