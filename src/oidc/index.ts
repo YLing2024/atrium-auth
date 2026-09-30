@@ -9,10 +9,15 @@
  * 与既有 /api/* 完全解耦：本模块只新增路由，不改任何旧接口语义。
  */
 
-const express = require('express');
+const express: typeof import('express') = require('express');
 
-const { KeyStore } = require('./keys');
-const { ClientRegistry } = require('./clients');
+import type { Request, Response, NextFunction } from 'express';
+import type { KeysExports, JwtPayload } from './keys.ts';
+import type { ClientsExports, ClientRecord } from './clients.ts';
+import type { UtilExports } from './util.ts';
+
+const { KeyStore }: Pick<KeysExports, 'KeyStore'> = require('./keys.ts');
+const { ClientRegistry }: Pick<ClientsExports, 'ClientRegistry'> = require('./clients.ts');
 const {
   sha256hex,
   pkceChallenge,
@@ -21,7 +26,7 @@ const {
   parseCookies,
   htmlEscape,
   str,
-} = require('./util');
+}: UtilExports = require('./util.ts');
 
 const CODE_TTL = 60; // 授权码 60 秒
 // access_token 有效期（秒）。默认 15 分钟：Bearer 是本地验签，吊销后最多还能用到到期满，
@@ -40,6 +45,136 @@ const SSO_PREFIX = 'oidc:sso:';
 // 来源会话哈希 → 关联 SSO 令牌哈希集合（登出/删设备时反向彻底撤销共享 cookie）
 const SSO_SESSION_INDEX_PREFIX = 'oidc:sso-session:';
 
+type RedisClient = InstanceType<typeof import('ioredis').default>;
+type KeyStoreInstance = InstanceType<KeysExports['KeyStore']>;
+type ClientRegistryInstance = InstanceType<ClientsExports['ClientRegistry']>;
+
+export type OidcOptions = {
+  redis: RedisClient;
+  redisAvailable?: () => boolean;
+  dataDir: string;
+  issuer: string;
+  subject?: string;
+  displayName?: string;
+  legacySubjects?: string[];
+  loginPagePath: string;
+  sessionTtl?: number;
+  cookieName?: string;
+};
+
+export type DiscoveryDoc = {
+  issuer: string;
+  authorization_endpoint: string;
+  token_endpoint: string;
+  userinfo_endpoint: string;
+  jwks_uri: string;
+  end_session_endpoint: string;
+  introspection_endpoint: string;
+  revocation_endpoint: string;
+  response_types_supported: string[];
+  grant_types_supported: string[];
+  code_challenge_methods_supported: string[];
+  scopes_supported: string[];
+  id_token_signing_alg_values_supported: string[];
+  token_endpoint_auth_methods_supported: string[];
+  subject_types_supported: string[];
+  claims_supported: string[];
+};
+
+type SessionSource = 'legacy' | 'sso' | 'access';
+export type ResolvedSession = {
+  sub: string;
+  auth_time?: number;
+  sid?: string;
+  source: SessionSource;
+  raw?: string;
+};
+
+type SsoRecord = {
+  sub: string;
+  auth_time?: number;
+  sid?: string;
+  client_id?: string;
+  session_hash?: string;
+};
+
+type AccessRecord = {
+  sub: string;
+  client_id: string;
+  scope?: string;
+  sid?: string;
+  auth_time?: number;
+  exp?: number;
+};
+
+type RefreshRecord = {
+  sub: string;
+  client_id: string;
+  scope?: string;
+  sid?: string;
+  auth_time?: number;
+  chain: string;
+  used: boolean;
+};
+
+type CodeRecord = {
+  client_id: string;
+  redirect_uri: string;
+  code_challenge: string;
+  code_challenge_method: string;
+  nonce?: string;
+  sub: string;
+  auth_time: number;
+  scope: string;
+  sid?: string;
+};
+
+type IssueParams = {
+  sub: string;
+  client: ClientRecord;
+  scope?: string;
+  nonce?: string;
+  auth_time?: number;
+  sid?: string;
+  chain?: string;
+};
+
+type TokenSet = {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  id_token: string;
+  scope: string;
+  refresh_token?: string;
+};
+
+type ExchangeParams = {
+  code: string;
+  clientId: string;
+  redirectUri: string;
+  codeVerifier: string;
+  client: ClientRecord;
+};
+
+type OAuthError = Error & { oauthError?: string; oauthDescription?: string };
+
+export type OidcProvider = {
+  router: import('express').Router;
+  keyStore: KeyStoreInstance;
+  registry: ClientRegistryInstance;
+  discovery: () => DiscoveryDoc;
+  // 供 /api/verify 与 revokeSession 复用（SSO 令牌双向兼容 / 彻底撤销）
+  verifySsoToken: (token: string) => Promise<{ sub: string; exp: number } | null>;
+  revokeSsoForToken: (token: string) => Promise<void>;
+  // 供测试/诊断
+  _internal: {
+    exchangeCode: (params: ExchangeParams) => Promise<TokenSet>;
+    resolveSession: (req: Request) => Promise<(ResolvedSession & { raw: string }) | null>;
+    validateToken: (tok: string) => Promise<ResolvedSession | null>;
+    issueTokens: (params: IssueParams) => Promise<TokenSet>;
+  };
+};
+
 /**
  * @param {object} opts
  * @param {import('ioredis').Redis} opts.redis
@@ -55,7 +190,7 @@ const SSO_SESSION_INDEX_PREFIX = 'oidc:sso-session:';
  * @param {number} [opts.sessionTtl] SSO cookie 生命周期（秒）
  * @param {string} [opts.cookieName]
  */
-function createOidcProvider(opts) {
+function createOidcProvider(opts: OidcOptions): OidcProvider {
   const redis = opts.redis;
   const redisAvailable = opts.redisAvailable || (() => false);
   const issuer = String(opts.issuer || 'http://127.0.0.1:3200').replace(/\/+$/, '');
@@ -63,8 +198,8 @@ function createOidcProvider(opts) {
   const subject = String(opts.subject || 'linden');
   const displayName = String(opts.displayName || subject);
   // 历史遗留标签（如 cookie 名 'HomeAuth'）读取时归一化，保证新旧令牌/会话身份一致
-  const legacySubjects = new Set(Array.isArray(opts.legacySubjects) ? opts.legacySubjects : []);
-  const normalizeSub = (s) => {
+  const legacySubjects = new Set<string>(Array.isArray(opts.legacySubjects) ? opts.legacySubjects : []);
+  const normalizeSub = (s: unknown): string => {
     if (!s) return subject;
     return legacySubjects.has(String(s)) ? subject : String(s);
   };
@@ -99,18 +234,20 @@ function createOidcProvider(opts) {
     return next();
   });
 
-  const wrap = (fn) => (req, res, next) => {
-    Promise.resolve(fn(req, res, next)).catch((err) => {
-      console.error(`[oidc] ${req.method} ${req.path} error: ${err.message}`);
-      if (!res.headersSent) res.status(500).json({ error: 'server_error' });
-    });
-  };
+  const wrap =
+    (fn: (req: Request, res: Response, next: NextFunction) => unknown) =>
+    (req: Request, res: Response, next: NextFunction): void => {
+      Promise.resolve(fn(req, res, next)).catch((err: Error) => {
+        console.error(`[oidc] ${req.method} ${req.path} error: ${err.message}`);
+        if (!res.headersSent) res.status(500).json({ error: 'server_error' });
+      });
+    };
 
   const now = () => Math.floor(Date.now() / 1000);
 
   /* ---------------- 通用响应 ---------------- */
 
-  function discovery() {
+  function discovery(): DiscoveryDoc {
     return {
       issuer,
       authorization_endpoint: `${issuer}/authorize`,
@@ -142,7 +279,7 @@ function createOidcProvider(opts) {
     };
   }
 
-  function errorPage(res, status, code, description) {
+  function errorPage(res: Response, status: number, code: string, description: string): void {
     const body = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>授权失败</title>
@@ -159,7 +296,7 @@ function createOidcProvider(opts) {
     res.status(status).type('html').set('Cache-Control', 'no-store').send(body);
   }
 
-  function tokenError(res, error, description, status = 400) {
+  function tokenError(res: Response, error: string, description: string, status = 400): Response {
     if (error === 'invalid_client') {
       res.setHeader('WWW-Authenticate', 'Basic realm="oidc"');
     }
@@ -172,7 +309,7 @@ function createOidcProvider(opts) {
 
   /* ---------------- 会话 ---------------- */
 
-  async function validateToken(tok) {
+  async function validateToken(tok: string): Promise<ResolvedSession | null> {
     if (!tok || !redisAvailable()) return null;
     try {
       // 1) 旧登录会话（原始 Redis key）；历史值可能是旧标签，统一归一化身份
@@ -184,24 +321,24 @@ function createOidcProvider(opts) {
       // 2) 首方 SSO 会话（哈希存储）
       const ssoRaw = await redis.get(SSO_PREFIX + sha256hex(tok));
       if (ssoRaw) {
-        const s = JSON.parse(ssoRaw);
+        const s = JSON.parse(ssoRaw) as SsoRecord;
         await redis.expire(SSO_PREFIX + sha256hex(tok), sessionTtl);
         return { sub: normalizeSub(s.sub), auth_time: s.auth_time, sid: s.sid, source: 'sso' };
       }
       // 3) OIDC access_token
       const atRaw = await redis.get(AT_PREFIX + sha256hex(tok));
       if (atRaw) {
-        const a = JSON.parse(atRaw);
+        const a = JSON.parse(atRaw) as AccessRecord;
         return { sub: normalizeSub(a.sub), auth_time: a.auth_time, sid: a.sid, source: 'access' };
       }
     } catch (err) {
-      console.error(`[oidc] session lookup error: ${err.message}`);
+      console.error(`[oidc] session lookup error: ${(err as Error).message}`);
     }
     return null;
   }
 
-  async function resolveSession(req) {
-    const candidates = [];
+  async function resolveSession(req: Request): Promise<(ResolvedSession & { raw: string }) | null> {
+    const candidates: string[] = [];
     const cookie = parseCookies(req.headers.cookie)[cookieName];
     if (cookie) candidates.push(cookie);
     const q = str(req.query.token);
@@ -215,13 +352,13 @@ function createOidcProvider(opts) {
     return null;
   }
 
-  async function ensureSsoSession(session, client) {
+  async function ensureSsoSession(session: ResolvedSession, client: ClientRecord): Promise<string> {
     if (session.source === 'sso' && session.raw) {
       const h = sha256hex(session.raw);
       await redis.expire(SSO_PREFIX + h, sessionTtl);
       try {
         const raw = await redis.get(SSO_PREFIX + h);
-        const rec = raw ? JSON.parse(raw) : null;
+        const rec = raw ? (JSON.parse(raw) as SsoRecord) : null;
         if (rec && rec.session_hash) {
           await redis.expire(SSO_SESSION_INDEX_PREFIX + rec.session_hash, sessionTtl);
         }
@@ -232,7 +369,7 @@ function createOidcProvider(opts) {
     }
     const token = randomToken(32);
     const h = sha256hex(token);
-    const rec = {
+    const rec: SsoRecord = {
       sub: session.sub,
       auth_time: session.auth_time || now(),
       sid: session.sid || h.slice(0, 16),
@@ -252,16 +389,16 @@ function createOidcProvider(opts) {
   }
 
   // 供 /api/verify 兼容识别首方共享 cookie 的 SSO 令牌：命中刷新滑动 TTL，返回身份。
-  async function verifySsoToken(token) {
+  async function verifySsoToken(token: string): Promise<{ sub: string; exp: number } | null> {
     if (!token || !redisAvailable()) return null;
     try {
       const h = sha256hex(token);
       const key = SSO_PREFIX + h;
       const raw = await redis.get(key);
       if (!raw) return null;
-      let rec;
+      let rec: SsoRecord;
       try {
-        rec = JSON.parse(raw);
+        rec = JSON.parse(raw) as SsoRecord;
       } catch {
         return null;
       }
@@ -273,13 +410,13 @@ function createOidcProvider(opts) {
       const ttl = await redis.ttl(key);
       return { sub: normalizeSub(rec.sub), exp: now() + Math.max(0, ttl) };
     } catch (err) {
-      console.error(`[oidc] sso verify error: ${err.message}`);
+      console.error(`[oidc] sso verify error: ${(err as Error).message}`);
       return null;
     }
   }
 
   // 彻底撤销：token 可能本身就是 SSO 令牌，也可能是与 SSO 关联的来源会话 token。
-  async function revokeSsoForToken(token) {
+  async function revokeSsoForToken(token: string): Promise<void> {
     if (!token || !redisAvailable()) return;
     try {
       const h = sha256hex(token);
@@ -289,28 +426,28 @@ function createOidcProvider(opts) {
       if (members.length) await redis.del(...members.map((m) => SSO_PREFIX + m));
       await redis.del(idxKey);
     } catch (err) {
-      console.error(`[oidc] sso revoke error: ${err.message}`);
+      console.error(`[oidc] sso revoke error: ${(err as Error).message}`);
     }
   }
 
-  function cookieHeader(value, maxAge, domain) {
+  function cookieHeader(value: string, maxAge: number, domain: string | null | undefined): string {
     const parts = [`${cookieName}=${value}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Max-Age=${maxAge}`];
     if (secureCookies) parts.push('Secure');
     if (domain) parts.push(`Domain=${domain}`);
     return parts.join('; ');
   }
 
-  function setSsoCookie(res, token, client) {
+  function setSsoCookie(res: Response, token: string, client: ClientRecord | null): void {
     res.append('Set-Cookie', cookieHeader(token, sessionTtl, client && client.cookie_domain));
   }
 
-  function clearSsoCookie(res, domain) {
+  function clearSsoCookie(res: Response, domain: string | undefined): void {
     res.append('Set-Cookie', cookieHeader('', 0, domain));
   }
 
   /* ---------------- 令牌签发 ---------------- */
 
-  async function issueTokens(params) {
+  async function issueTokens(params: IssueParams): Promise<TokenSet> {
     const t = now();
     const { sub, client, scope, nonce, auth_time, sid } = params;
 
@@ -337,7 +474,7 @@ function createOidcProvider(opts) {
       ACCESS_TTL
     );
 
-    const idClaims = {
+    const idClaims: JwtPayload = {
       iss: issuer,
       sub,
       aud: client.client_id,
@@ -351,7 +488,7 @@ function createOidcProvider(opts) {
     if (sid) idClaims.sid = sid;
     const idToken = keyStore.signJwt(idClaims);
 
-    const out = {
+    const out: TokenSet = {
       access_token: accessToken,
       token_type: 'Bearer',
       expires_in: ACCESS_TTL,
@@ -376,7 +513,7 @@ function createOidcProvider(opts) {
     return out;
   }
 
-  async function revokeChain(chain) {
+  async function revokeChain(chain: string): Promise<void> {
     if (!chain) return;
     const members = await redis.smembers(RTCHAIN_PREFIX + chain);
     const keys = members.map((h) => RT_PREFIX + h);
@@ -384,12 +521,12 @@ function createOidcProvider(opts) {
     await redis.del(RTCHAIN_PREFIX + chain);
   }
 
-  function clientAuth(req) {
+  function clientAuth(req: Request): { clientId: string; secret: string } {
     let clientId = str(req.body && req.body.client_id);
     let secret = str(req.body && req.body.client_secret);
     const header = req.headers.authorization || '';
     if (/^Basic\s+/i.test(header)) {
-      let decoded;
+      let decoded: string;
       try {
         decoded = Buffer.from(header.replace(/^Basic\s+/i, ''), 'base64').toString('utf8');
       } catch {
@@ -484,7 +621,7 @@ function createOidcProvider(opts) {
 
       const authTime = session.auth_time || now();
       const code = randomToken(32);
-      const rec = {
+      const rec: CodeRecord = {
         client_id: client.client_id,
         redirect_uri: redirectUri,
         code_challenge: codeChallenge || '',
@@ -499,7 +636,7 @@ function createOidcProvider(opts) {
 
       if (client.first_party) {
         // 首方：auth-server 自己完成 code→token，落共享 cookie，再回跳
-        let tokens;
+        let tokens: TokenSet;
         try {
           tokens = await exchangeCode({
             code,
@@ -509,7 +646,7 @@ function createOidcProvider(opts) {
             client,
           });
         } catch (err) {
-          console.error(`[oidc] first_party exchange failed: ${err.message}`);
+          console.error(`[oidc] first_party exchange failed: ${(err as Error).message}`);
           return errorPage(res, 500, 'server_error', '首方令牌交换失败');
         }
         const ssoToken = await ensureSsoSession(session, client);
@@ -534,12 +671,12 @@ function createOidcProvider(opts) {
    * 消耗授权码并签发令牌（/token 与首方模式共用）。
    * 失败抛 Error（带 .oauthError / .oauthDescription）。
    */
-  async function exchangeCode({ code, clientId, redirectUri, codeVerifier, client }) {
+  async function exchangeCode({ code, clientId, redirectUri, codeVerifier, client }: ExchangeParams): Promise<TokenSet> {
     const raw = await redis.getdel(CODE_PREFIX + sha256hex(code));
     if (!raw) throw oauthErr('invalid_grant', '授权码无效、已使用或已过期');
-    let rec;
+    let rec: CodeRecord;
     try {
-      rec = JSON.parse(raw);
+      rec = JSON.parse(raw) as CodeRecord;
     } catch {
       throw oauthErr('invalid_grant', '授权码记录损坏');
     }
@@ -563,8 +700,8 @@ function createOidcProvider(opts) {
     });
   }
 
-  function oauthErr(error, description) {
-    const e = new Error(description);
+  function oauthErr(error: string, description: string): OAuthError {
+    const e = new Error(description) as OAuthError;
     e.oauthError = error;
     e.oauthDescription = description;
     return e;
@@ -608,9 +745,9 @@ function createOidcProvider(opts) {
           const key = RT_PREFIX + h;
           const raw = await redis.get(key);
           if (!raw) return tokenError(res, 'invalid_grant', 'refresh_token 无效或已过期');
-          let rec;
+          let rec: RefreshRecord;
           try {
-            rec = JSON.parse(raw);
+            rec = JSON.parse(raw) as RefreshRecord;
           } catch {
             return tokenError(res, 'invalid_grant', 'refresh_token 记录损坏');
           }
@@ -637,20 +774,22 @@ function createOidcProvider(opts) {
         }
         return tokenError(res, 'unsupported_grant_type', '不支持的 grant_type');
       } catch (err) {
-        if (err.oauthError) return tokenError(res, err.oauthError, err.oauthDescription);
+        if ((err as OAuthError).oauthError) {
+          return tokenError(res, (err as OAuthError).oauthError as string, (err as OAuthError).oauthDescription as string);
+        }
         throw err;
       }
     })
   );
 
-  function sendTokens(res, tokens) {
+  function sendTokens(res: Response, tokens: TokenSet): Response {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Pragma', 'no-cache');
     return res.json(tokens);
   }
 
   // GET/POST /userinfo
-  async function userinfoHandler(req, res) {
+  async function userinfoHandler(req: Request, res: Response): Promise<Response> {
     const header = req.headers.authorization || '';
     const m = /^Bearer\s+(.+)$/i.exec(header);
     const token = m ? m[1].trim() : str(req.body && req.body.access_token);
@@ -661,12 +800,12 @@ function createOidcProvider(opts) {
     if (!redisAvailable()) {
       return res.status(503).json({ error: 'temporarily_unavailable' });
     }
-    let rec = null;
+    let rec: AccessRecord | null = null;
     try {
       const raw = await redis.get(AT_PREFIX + sha256hex(token));
-      if (raw) rec = JSON.parse(raw);
+      if (raw) rec = JSON.parse(raw) as AccessRecord;
     } catch (err) {
-      console.error(`[oidc] userinfo error: ${err.message}`);
+      console.error(`[oidc] userinfo error: ${(err as Error).message}`);
       return res.status(503).json({ error: 'temporarily_unavailable' });
     }
     if (!rec) {
@@ -674,7 +813,11 @@ function createOidcProvider(opts) {
       return res.status(401).json({ error: 'invalid_token', error_description: 'access_token 无效或已过期' });
     }
     const subj = normalizeSub(rec.sub);
-    const body = { sub: subj, preferred_username: subj, name: displayName };
+    const body: { sub: string; preferred_username: string; name: string; sid?: string } = {
+      sub: subj,
+      preferred_username: subj,
+      name: displayName,
+    };
     if (rec.sid) body.sid = rec.sid;
     res.setHeader('Cache-Control', 'no-store');
     return res.json(body);
@@ -683,7 +826,7 @@ function createOidcProvider(opts) {
   router.post('/userinfo', wrap(userinfoHandler));
 
   // POST /introspect（RFC 7662）
-  async function introspectHandler(req, res) {
+  async function introspectHandler(req: Request, res: Response): Promise<Response> {
     const header = req.headers.authorization || '';
     const m = /^Bearer\s+(.+)$/i.exec(header);
     const token = str(req.body && req.body.token) || str(req.query.token) || (m ? m[1].trim() : '');
@@ -694,7 +837,7 @@ function createOidcProvider(opts) {
       const h = sha256hex(token);
       const atRaw = await redis.get(AT_PREFIX + h);
       if (atRaw) {
-        const a = JSON.parse(atRaw);
+        const a = JSON.parse(atRaw) as AccessRecord;
         return res.json({
           active: true,
           sub: normalizeSub(a.sub),
@@ -706,7 +849,7 @@ function createOidcProvider(opts) {
       }
       const rtRaw = await redis.get(RT_PREFIX + h);
       if (rtRaw) {
-        const r = JSON.parse(rtRaw);
+        const r = JSON.parse(rtRaw) as RefreshRecord;
         if (r.used) return inactive();
         return res.json({
           active: true,
@@ -718,7 +861,7 @@ function createOidcProvider(opts) {
       }
       const ssoRaw = await redis.get(SSO_PREFIX + h);
       if (ssoRaw) {
-        const s = JSON.parse(ssoRaw);
+        const s = JSON.parse(ssoRaw) as SsoRecord;
         return res.json({
           active: true,
           sub: normalizeSub(s.sub),
@@ -733,7 +876,7 @@ function createOidcProvider(opts) {
         return res.json({ active: true, sub: normalizeSub(user), scope: 'openid', token_type: 'session' });
       }
     } catch (err) {
-      console.error(`[oidc] introspect error: ${err.message}`);
+      console.error(`[oidc] introspect error: ${(err as Error).message}`);
       return res.status(503).json({ error: 'temporarily_unavailable' });
     }
     return inactive();
@@ -759,7 +902,7 @@ function createOidcProvider(opts) {
         if (rtRaw) {
           let chain = '';
           try {
-            chain = JSON.parse(rtRaw).chain;
+            chain = (JSON.parse(rtRaw) as RefreshRecord).chain;
           } catch {
             /* ignore */
           }
@@ -768,20 +911,20 @@ function createOidcProvider(opts) {
         await revokeSsoForToken(token);
         await redis.del(token); // 旧会话
       } catch (err) {
-        console.error(`[oidc] revoke error: ${err.message}`);
+        console.error(`[oidc] revoke error: ${(err as Error).message}`);
       }
       return res.json({});
     })
   );
 
   // GET/POST /end_session（RP-Initiated Logout）
-  async function endSessionHandler(req, res) {
+  async function endSessionHandler(req: Request, res: Response): Promise<void | Response> {
     const src = req.method === 'POST' ? req.body : req.query;
     const cookieToken = parseCookies(req.headers.cookie)[cookieName];
     const idTokenHint = str(src.id_token_hint);
     const postLogout = str(src.post_logout_redirect_uri);
 
-    let hintClient = null;
+    let hintClient: ClientRecord | null = null;
     let hintDomain = '';
     if (idTokenHint) {
       try {
@@ -789,7 +932,7 @@ function createOidcProvider(opts) {
         hintClient = registry.get(payload.aud);
         if (hintClient) hintDomain = hintClient.cookie_domain;
       } catch (err) {
-        if (!postLogout) return errorPage(res, 400, 'invalid_request', `id_token_hint 无效: ${err.message}`);
+        if (!postLogout) return errorPage(res, 400, 'invalid_request', `id_token_hint 无效: ${(err as Error).message}`);
       }
     }
 
@@ -822,10 +965,10 @@ function createOidcProvider(opts) {
 
   /* ---------------- 旧登录页（?redirect= 白名单） ---------------- */
 
-  function isAllowedRedirect(raw) {
+  function isAllowedRedirect(raw: unknown): boolean {
     if (typeof raw !== 'string' || !raw) return false;
     if (raw.startsWith('/')) return !raw.startsWith('//') && !raw.includes('\\');
-    let u;
+    let u: URL;
     try {
       u = new URL(raw);
     } catch {
@@ -868,5 +1011,10 @@ function createOidcProvider(opts) {
     _internal: { exchangeCode, resolveSession, validateToken, issueTokens },
   };
 }
+
+// 类型-only 导出：让 TS 认为本文件是模块并拿到 require 的真实形状；运行时被类型剥离删除。
+export type OidcExports = {
+  createOidcProvider: typeof createOidcProvider;
+};
 
 module.exports = { createOidcProvider };

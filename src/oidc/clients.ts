@@ -19,13 +19,26 @@
  * 加载时非法条目会被跳过（不拖垮服务）；跳过的原因写入 warnings。
  */
 
-const fs = require('node:fs');
+const fs: typeof import('node:fs') = require('node:fs');
 
-const { timingEqual } = require('./util');
+import type { UtilExports } from './util.ts';
 
-const DEFAULT_GRANTS = ['authorization_code'];
+const { timingEqual }: Pick<UtilExports, 'timingEqual'> = require('./util.ts');
 
-function isLoopbackHost(host) {
+export type ClientRecord = {
+  client_id: string;
+  client_secret: string;
+  redirect_uris: string[];
+  post_logout_redirect_uris: string[];
+  grant_types: string[];
+  scopes: string[];
+  first_party: boolean;
+  cookie_domain: string;
+};
+
+const DEFAULT_GRANTS: string[] = ['authorization_code'];
+
+function isLoopbackHost(host: string): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
 }
 
@@ -33,10 +46,10 @@ function isLoopbackHost(host) {
  * 校验单个 redirect URI。
  * @returns {string|null} 错误描述；null 表示通过
  */
-function redirectUriError(uri) {
+function redirectUriError(uri: unknown): string | null {
   if (typeof uri !== 'string' || !uri) return 'redirect_uri 必须是非空字符串';
   if (uri.includes('*')) return 'redirect_uri 不允许通配符 *';
-  let u;
+  let u: URL;
   try {
     u = new URL(uri);
   } catch {
@@ -54,15 +67,16 @@ function redirectUriError(uri) {
  * 校验客户端注册项。
  * @returns {{ok:true, client:object} | {ok:false, errors:string[]}}
  */
-function validateClient(raw) {
-  const errors = [];
+function validateClient(raw: unknown): { ok: true; client: ClientRecord } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { ok: false, errors: ['客户端必须是对象'] };
   }
-  const clientId = raw.client_id;
+  const r = raw as Record<string, unknown>;
+  const clientId = r.client_id;
   if (typeof clientId !== 'string' || !clientId.trim()) errors.push('client_id 必填');
 
-  const redirectUris = raw.redirect_uris;
+  const redirectUris = r.redirect_uris;
   if (!Array.isArray(redirectUris) || redirectUris.length === 0) {
     errors.push('redirect_uris 必填且非空');
   } else {
@@ -72,7 +86,7 @@ function validateClient(raw) {
     }
   }
 
-  const postLogout = raw.post_logout_redirect_uris;
+  const postLogout = r.post_logout_redirect_uris;
   if (postLogout !== undefined) {
     if (!Array.isArray(postLogout)) {
       errors.push('post_logout_redirect_uris 必须是数组');
@@ -84,19 +98,19 @@ function validateClient(raw) {
     }
   }
 
-  if (raw.client_secret !== undefined && typeof raw.client_secret !== 'string') {
+  if (r.client_secret !== undefined && typeof r.client_secret !== 'string') {
     errors.push('client_secret 必须是字符串');
   }
-  if (raw.first_party !== undefined && typeof raw.first_party !== 'boolean') {
+  if (r.first_party !== undefined && typeof r.first_party !== 'boolean') {
     errors.push('first_party 必须是布尔');
   }
-  if (raw.cookie_domain !== undefined && typeof raw.cookie_domain !== 'string') {
+  if (r.cookie_domain !== undefined && typeof r.cookie_domain !== 'string') {
     errors.push('cookie_domain 必须是字符串');
   }
-  if (raw.grant_types !== undefined && !Array.isArray(raw.grant_types)) {
+  if (r.grant_types !== undefined && !Array.isArray(r.grant_types)) {
     errors.push('grant_types 必须是数组');
   }
-  if (raw.scopes !== undefined && !Array.isArray(raw.scopes)) {
+  if (r.scopes !== undefined && !Array.isArray(r.scopes)) {
     errors.push('scopes 必须是数组');
   }
 
@@ -105,44 +119,49 @@ function validateClient(raw) {
   return {
     ok: true,
     client: {
-      client_id: clientId,
-      client_secret: typeof raw.client_secret === 'string' ? raw.client_secret : '',
-      redirect_uris: redirectUris.slice(),
-      post_logout_redirect_uris: Array.isArray(postLogout) ? postLogout.slice() : [],
-      grant_types: Array.isArray(raw.grant_types) ? raw.grant_types.slice() : DEFAULT_GRANTS.slice(),
-      scopes: Array.isArray(raw.scopes) ? raw.scopes.slice() : [],
-      first_party: raw.first_party === true,
-      cookie_domain: typeof raw.cookie_domain === 'string' ? raw.cookie_domain : '',
+      client_id: clientId as string,
+      client_secret: typeof r.client_secret === 'string' ? r.client_secret : '',
+      redirect_uris: (redirectUris as string[]).slice(),
+      post_logout_redirect_uris: Array.isArray(postLogout) ? (postLogout as string[]).slice() : [],
+      grant_types: Array.isArray(r.grant_types) ? (r.grant_types as string[]).slice() : DEFAULT_GRANTS.slice(),
+      scopes: Array.isArray(r.scopes) ? (r.scopes as string[]).slice() : [],
+      first_party: r.first_party === true,
+      cookie_domain: typeof r.cookie_domain === 'string' ? r.cookie_domain : '',
     },
   };
 }
 
 class ClientRegistry {
+  file: string;
+  clients: Map<string, ClientRecord>;
+  warnings: string[];
+
   /**
    * @param {string} file clients.json 路径
    */
-  constructor(file) {
+  constructor(file: string) {
     this.file = file;
     this.clients = new Map();
     this.warnings = [];
     this.load();
   }
 
-  load() {
+  load(): void {
     if (!this.file || !fs.existsSync(this.file)) return;
     try {
       fs.chmodSync(this.file, 0o600); // 注册表含 client_secret，收紧为 0600
     } catch (e) {
       /* 部分文件系统不支持，忽略 */
     }
-    let data;
+    let data: unknown;
     try {
       data = JSON.parse(fs.readFileSync(this.file, 'utf8'));
     } catch (err) {
-      this.warnings.push(`clients.json 解析失败，按空注册表处理: ${err.message}`);
+      this.warnings.push(`clients.json 解析失败，按空注册表处理: ${(err as Error).message}`);
       return;
     }
-    const list = Array.isArray(data) ? data : data && Array.isArray(data.clients) ? data.clients : null;
+    const obj = data as { clients?: unknown };
+    const list: unknown[] | null = Array.isArray(data) ? data : obj && Array.isArray(obj.clients) ? obj.clients : null;
     if (!list) {
       this.warnings.push('clients.json 结构非法（应为数组或 {clients: []}），按空注册表处理');
       return;
@@ -150,43 +169,51 @@ class ClientRegistry {
     for (const raw of list) {
       const res = validateClient(raw);
       if (!res.ok) {
-        this.warnings.push(`跳过非法客户端 ${raw && raw.client_id ? raw.client_id : '(无 id)'}: ${res.errors.join('; ')}`);
+        const rawId = raw && (raw as { client_id?: unknown }).client_id;
+        this.warnings.push(`跳过非法客户端 ${rawId ? rawId : '(无 id)'}: ${res.errors.join('; ')}`);
         continue;
       }
       this.clients.set(res.client.client_id, res.client);
     }
   }
 
-  get(clientId) {
-    return this.clients.get(clientId) || null;
+  get(clientId: string | undefined): ClientRecord | null {
+    return this.clients.get(clientId as string) || null;
   }
 
-  isConfidential(client) {
+  isConfidential(client: ClientRecord): boolean {
     return typeof client.client_secret === 'string' && client.client_secret.length > 0;
   }
 
-  checkSecret(client, provided) {
+  checkSecret(client: ClientRecord, provided: unknown): boolean {
     if (!this.isConfidential(client)) return true;
     if (typeof provided !== 'string' || !provided) return false;
     return timingEqual(client.client_secret, provided);
   }
 
-  matchRedirect(client, uri) {
+  matchRedirect(client: ClientRecord, uri: unknown): boolean {
     return typeof uri === 'string' && client.redirect_uris.includes(uri);
   }
 
-  matchPostLogout(client, uri) {
+  matchPostLogout(client: ClientRecord, uri: unknown): boolean {
     return typeof uri === 'string' && client.post_logout_redirect_uris.includes(uri);
   }
 
-  allowsGrant(client, grant) {
+  allowsGrant(client: ClientRecord, grant: string): boolean {
     return client.grant_types.includes(grant);
   }
 
-  allowsScope(client, scope) {
+  allowsScope(client: ClientRecord, scope: string): boolean {
     if (!client.scopes.length) return true;
     return client.scopes.includes(scope);
   }
 }
+
+// 类型-only 导出：让 TS 认为本文件是模块并拿到 require 的真实形状；运行时被类型剥离删除。
+export type ClientsExports = {
+  ClientRegistry: typeof ClientRegistry;
+  validateClient: typeof validateClient;
+  redirectUriError: typeof redirectUriError;
+};
 
 module.exports = { ClientRegistry, validateClient, redirectUriError };

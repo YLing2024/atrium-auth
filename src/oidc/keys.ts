@@ -9,19 +9,48 @@
  * - id_token **只允许 ES256**，绝不使用 HS256
  */
 
-const fs = require('node:fs');
-const path = require('node:path');
-const crypto = require('node:crypto');
+const fs: typeof import('node:fs') = require('node:fs');
+const path: typeof import('node:path') = require('node:path');
+const crypto: typeof import('node:crypto') = require('node:crypto');
 
-const { b64url, b64urlDecode, b64urlJson } = require('./util');
+import type { UtilExports } from './util.ts';
 
-function thumbprint(jwk) {
+const { b64url, b64urlDecode, b64urlJson }: UtilExports = require('./util.ts');
+
+type JsonWebKey = import('node:crypto').webcrypto.JsonWebKey;
+
+type KeyEntry = {
+  kid: string;
+  createdAt: number;
+  privateJwk: JsonWebKey;
+  publicJwk: JsonWebKey;
+};
+
+// 本服务自签 JWT 的载荷形状（id_token / access_token / end_session 的 id_token_hint）
+export type JwtPayload = {
+  exp: number;
+  iss?: string;
+  aud?: string;
+  iat?: number;
+  sub?: string;
+  auth_time?: number;
+  nonce?: string;
+  sid?: string;
+  preferred_username?: string;
+  name?: string;
+  jti?: string;
+  scope?: string;
+  client_id?: string;
+  [key: string]: unknown;
+};
+
+function thumbprint(jwk: JsonWebKey): string {
   // RFC 7638：成员按字典序、无空白，仅必需成员
   const canonical = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
   return crypto.createHash('sha256').update(canonical).digest('base64url');
 }
 
-function generateKey() {
+function generateKey(): KeyEntry {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const publicJwk = publicKey.export({ format: 'jwk' }); // { kty, crv, x, y }
   const privateJwk = privateKey.export({ format: 'jwk' }); // 含 d
@@ -29,27 +58,34 @@ function generateKey() {
   return { kid, createdAt: Date.now(), privateJwk, publicJwk };
 }
 
+function isKeyEntry(k: Partial<KeyEntry> | null | undefined): k is KeyEntry {
+  return !!(k && k.privateJwk && k.publicJwk && k.kid);
+}
+
 class KeyStore {
+  file: string;
+  keys: KeyEntry[];
+
   /**
    * @param {string} file oidc-keys.json 路径
    */
-  constructor(file) {
+  constructor(file: string) {
     this.file = file;
     this.keys = []; // 最新在前
     this.load();
   }
 
-  load() {
-    let data = null;
+  load(): void {
+    let data: { keys?: (Partial<KeyEntry> | null)[] } | null = null;
     if (fs.existsSync(this.file)) {
       try {
         data = JSON.parse(fs.readFileSync(this.file, 'utf8'));
       } catch (err) {
-        throw new Error(`oidc-keys: 无法解析 ${this.file}: ${err.message}`);
+        throw new Error(`oidc-keys: 无法解析 ${this.file}: ${(err as Error).message}`);
       }
     }
     if (data && Array.isArray(data.keys) && data.keys.length) {
-      this.keys = data.keys.filter((k) => k && k.privateJwk && k.publicJwk && k.kid);
+      this.keys = data.keys.filter(isKeyEntry);
       if (!this.keys.length) throw new Error('oidc-keys: 文件里没有可用密钥');
       // 兜底补 kid（旧文件可能缺）
       for (const k of this.keys) if (!k.kid) k.kid = thumbprint(k.publicJwk);
@@ -60,7 +96,7 @@ class KeyStore {
     this.save();
   }
 
-  save() {
+  save(): void {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ keys: this.keys }, null, 2), { mode: 0o600 });
@@ -73,18 +109,18 @@ class KeyStore {
   }
 
   /** 轮换：新增一把密钥并放到最前（后续签名的 kid） */
-  rotate() {
+  rotate(): string {
     this.keys.unshift(generateKey());
     this.save();
     return this.keys[0].kid;
   }
 
-  activeKid() {
+  activeKid(): string | null {
     return this.keys.length ? this.keys[0].kid : null;
   }
 
   /** JWKS：只暴露公钥，附带 kid/use/alg */
-  jwks() {
+  jwks(): { keys: Array<{ kty: string | undefined; crv: string | undefined; x: string | undefined; y: string | undefined; kid: string; use: string; alg: string }> } {
     return {
       keys: this.keys.map((k) => ({
         kty: k.publicJwk.kty,
@@ -98,7 +134,7 @@ class KeyStore {
     };
   }
 
-  get(kid) {
+  get(kid: string): KeyEntry | null {
     return this.keys.find((k) => k.kid === kid) || null;
   }
 
@@ -107,7 +143,7 @@ class KeyStore {
    * @param {object} payload claims（需已含 exp/iat 等）
    * @param {object} [opts] { kid }
    */
-  signJwt(payload, opts = {}) {
+  signJwt(payload: JwtPayload, opts: { kid?: string } = {}): string {
     const key = opts.kid ? this.get(opts.kid) : this.keys[0];
     if (!key) throw new Error('oidc-keys: no signing key');
     const header = { alg: 'ES256', typ: 'JWT', kid: key.kid };
@@ -126,17 +162,17 @@ class KeyStore {
    * @param {{issuer?:string, audience?:string}} [opts]
    * @returns {object} payload
    */
-  verifyJwt(token, opts = {}) {
+  verifyJwt(token: string, opts: { issuer?: string; audience?: string } = {}): JwtPayload {
     const parts = String(token).split('.');
     if (parts.length !== 3) throw new Error('jwt: malformed');
-    let header;
+    let header: { alg?: string; kid?: string };
     try {
       header = JSON.parse(b64urlDecode(parts[0]).toString('utf8'));
     } catch {
       throw new Error('jwt: bad header');
     }
     if (header.alg !== 'ES256') throw new Error('jwt: alg not allowed');
-    const key = this.get(header.kid);
+    const key = this.get(header.kid as string);
     if (!key) throw new Error('jwt: unknown kid');
     const publicKey = crypto.createPublicKey({ key: key.publicJwk, format: 'jwk' });
     const ok = crypto.verify(
@@ -146,7 +182,7 @@ class KeyStore {
       b64urlDecode(parts[2])
     );
     if (!ok) throw new Error('jwt: bad signature');
-    let payload;
+    let payload: JwtPayload;
     try {
       payload = JSON.parse(b64urlDecode(parts[1]).toString('utf8'));
     } catch {
@@ -159,5 +195,12 @@ class KeyStore {
     return payload;
   }
 }
+
+// 类型-only 导出：让 TS 认为本文件是模块并拿到 require 的真实形状；运行时被类型剥离删除。
+export type KeysExports = {
+  KeyStore: typeof KeyStore;
+  thumbprint: typeof thumbprint;
+  generateKey: typeof generateKey;
+};
 
 module.exports = { KeyStore, thumbprint, generateKey };

@@ -1,15 +1,19 @@
 'use strict';
 
-const fs = require('node:fs');
-const path = require('node:path');
-const crypto = require('node:crypto');
+const fs: typeof import('node:fs') = require('node:fs');
+const path: typeof import('node:path') = require('node:path');
+const crypto: typeof import('node:crypto') = require('node:crypto');
 
-const express = require('express');
-const Redis = require('ioredis');
-const { createTotpAuth } = require('../lib/totp-auth');
-const { base32Encode } = require('../lib/totp-auth/lib/totp');
-const { RateLimiter } = require('totp-auth/lib/rate-limit');
-const { createOidcProvider } = require('./oidc');
+const express: typeof import('express') = require('express');
+const Redis: typeof import('ioredis').default = require('ioredis');
+
+import type { Request, Response } from 'express';
+import type { OidcExports, OidcProvider } from './oidc/index.ts';
+
+const { createTotpAuth }: typeof import('../lib/totp-auth/index.js') = require('../lib/totp-auth/index.js');
+const { base32Encode }: Pick<typeof import('../lib/totp-auth/lib/totp.js'), 'base32Encode'> = require('../lib/totp-auth/lib/totp.js');
+const { RateLimiter }: Pick<typeof import('../lib/totp-auth/lib/rate-limit.js'), 'RateLimiter'> = require('../lib/totp-auth/lib/rate-limit.js');
+const { createOidcProvider }: OidcExports = require('./oidc/index.ts');
 
 const PORT = Number(process.env.PORT || 3200);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -19,9 +23,9 @@ const HOST = process.env.HOST || '0.0.0.0';
 const SSO_SUBJECT = process.env.SSO_SUBJECT || 'linden';
 const SSO_DISPLAY_NAME = process.env.SSO_DISPLAY_NAME || SSO_SUBJECT;
 // 历史上 Redis 会话值 / 已签发记录里可能残留的旧标签，读取时统一归一化为 SSO_SUBJECT
-const LEGACY_SUBJECTS = new Set(['HomeAuth']);
+const LEGACY_SUBJECTS = new Set<string>(['HomeAuth']);
 // 读取侧归一化：旧会话/旧令牌在过期前返回 SSO_SUBJECT，保证两条身份通道一致
-function normalizeSubject(stored) {
+function normalizeSubject(stored: string | null | undefined): string {
   if (!stored) return SSO_SUBJECT;
   return LEGACY_SUBJECTS.has(String(stored)) ? SSO_SUBJECT : String(stored);
 }
@@ -37,7 +41,7 @@ const REDIS_DB = Number(process.env.REDIS_DB || 0);
 // OIDC issuer：一律取环境变量 ISSUER，默认本机 3200（不得硬编码真实域名）
 const OIDC_ISSUER = process.env.ISSUER || 'http://127.0.0.1:3200';
 
-function loadOrCreateJwtSecret() {
+function loadOrCreateJwtSecret(): string {
   if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
   if (fs.existsSync(JWT_SECRET_FILE)) return fs.readFileSync(JWT_SECRET_FILE, 'utf8').trim();
   const secret = crypto.randomBytes(32).toString('hex');
@@ -53,7 +57,7 @@ const jwtSecret = loadOrCreateJwtSecret();
 const INTERNAL_TOKEN_FILE =
   process.env.INTERNAL_TOKEN_FILE || path.join(DATA_DIR, 'internal-token');
 
-function loadOrCreateInternalToken() {
+function loadOrCreateInternalToken(): string {
   if (process.env.INTERNAL_TOKEN) return process.env.INTERNAL_TOKEN;
   try {
     const existing = fs.readFileSync(INTERNAL_TOKEN_FILE, 'utf8').trim();
@@ -71,7 +75,7 @@ const internalToken = loadOrCreateInternalToken();
 
 // 内部令牌比对：定长 sha256 后再 timingSafeEqual，避免长度/时序差异；
 // 未提交或不匹配一律视为鉴权失败（调用方返回 401）。
-function internalTokenMatches(req) {
+function internalTokenMatches(req: Request): boolean {
   const provided = String(req.headers['x-internal-token'] || '');
   if (!provided) return false;
   const a = crypto.createHash('sha256').update(provided).digest();
@@ -92,7 +96,7 @@ const redis = new Redis({
   db: REDIS_DB,
   enableOfflineQueue: false,
   maxRetriesPerRequest: 2,
-  retryStrategy: (times) => Math.min(times * 200, 3000),
+  retryStrategy: (times: number) => Math.min(times * 200, 3000),
 });
 
 let redisReady = false;
@@ -100,7 +104,7 @@ redis.on('ready', () => {
   redisReady = true;
   console.log(`[auth-server] redis connected ${REDIS_HOST}:${REDIS_PORT} db=${REDIS_DB} session_ttl=${SESSION_TTL}s`);
 });
-redis.on('error', (err) => {
+redis.on('error', (err: Error) => {
   redisReady = false;
   console.error(`[auth-server] redis error: ${err.message}`);
 });
@@ -108,7 +112,7 @@ redis.on('end', () => {
   redisReady = false;
 });
 
-function redisAvailable() {
+function redisAvailable(): boolean {
   return redisReady && redis.status === 'ready';
 }
 
@@ -118,7 +122,7 @@ app.use(express.json());
 
 // 取客户端 IP：nginx 反代时 req.ip 恒为 127.0.0.1（trust proxy 未开），
 // 故优先取 x-forwarded-for 第一段（最贴近真实客户端）→ x-real-ip → req.ip
-function clientIp(req) {
+function clientIp(req: Request): string {
   const fwd = req.headers['x-forwarded-for'];
   if (fwd) {
     const first = String(fwd).split(',')[0].trim();
@@ -133,12 +137,12 @@ function clientIp(req) {
 
 // 索引集合存全部已登记会话 token；hash `auth:session:<token>` 存元数据，EXPIRE 与 token 同 TTL
 const SESSION_INDEX_KEY = 'auth:sessions';
-function sessionHashKey(token) {
+function sessionHashKey(token: string): string {
   return 'auth:session:' + token;
 }
 
 // 私网判定：私网 IP 直接标记 isLocal='1'，不解析地理位置
-function isPrivateIp(ip) {
+function isPrivateIp(ip: string): boolean {
   if (!ip) return true;
   if (ip === '::1' || ip.startsWith('fe80:')) return true;
   if (ip === 'unknown') return true;
@@ -157,10 +161,10 @@ function isPrivateIp(ip) {
 }
 
 // 从 User-Agent 推导设备名（浏览器 · 系统），与登录页 JS（public/index.html）同一套规则
-function deviceNameFromUA(ua) {
+function deviceNameFromUA(ua: string | undefined): string {
   if (!ua) return '';
-  const name = [];
-  let m;
+  const name: string[] = [];
+  let m: RegExpExecArray | null;
   if ((m = /Edg\/([\d.]+)/.exec(ua))) name.push('Edge ' + m[1]);
   else if (/OPR\//.test(ua) || /Opera/.test(ua)) name.push('Opera');
   else if ((m = /Firefox\/([\d.]+)/.exec(ua))) name.push('Firefox ' + m[1]);
@@ -184,9 +188,9 @@ const GEOIP_URL =
   process.env.AUTH_GEOIP_URL ||
   'https://ip-api.com/json/{ip}?fields=status,country,regionName,city';
 const GEO_CACHE_TTL_MS = 24 * 3600 * 1000;
-const geoCache = new Map(); // ip -> { location, ts }
+const geoCache = new Map<string, { location: string; ts: number }>(); // ip -> { location, ts }
 
-function geoCacheGet(ip) {
+function geoCacheGet(ip: string): string | undefined {
   const rec = geoCache.get(ip);
   if (!rec) return undefined;
   if (Date.now() - rec.ts > GEO_CACHE_TTL_MS) {
@@ -196,7 +200,7 @@ function geoCacheGet(ip) {
   return rec.location;
 }
 
-function geoCacheSet(ip, location) {
+function geoCacheSet(ip: string, location: string): void {
   if (geoCache.size > 5000) {
     // 防内存膨胀：超限时清掉一半最旧条目
     let n = 0;
@@ -208,7 +212,16 @@ function geoCacheSet(ip, location) {
   geoCache.set(ip, { location, ts: Date.now() });
 }
 
-async function resolveLocation(hashKey, ip) {
+type GeoData = {
+  status?: string;
+  success?: boolean;
+  country?: string;
+  regionName?: string;
+  region?: string;
+  city?: string;
+};
+
+async function resolveLocation(hashKey: string, ip: string): Promise<void> {
   try {
     if (!ip || isPrivateIp(ip)) return;
     const cached = geoCacheGet(ip);
@@ -216,13 +229,13 @@ async function resolveLocation(hashKey, ip) {
       if (cached) await redis.hset(hashKey, { location: cached });
       return;
     }
-    let data = null;
+    let data: GeoData | null = null;
     try {
       const res = await fetch(GEOIP_URL.replace('{ip}', encodeURIComponent(ip)), {
         headers: { Accept: 'application/json' },
         signal: AbortSignal.timeout(2500),
       });
-      if (res.ok) data = await res.json().catch(() => null);
+      if (res.ok) data = (await res.json().catch(() => null)) as GeoData | null;
     } catch (e) {
       // 网络失败静默（留空）
     }
@@ -242,7 +255,7 @@ async function resolveLocation(hashKey, ip) {
 
 // 登录后登记设备会话元数据：SADD 索引 + HSET 元数据 + EXPIRE（与 token 同 TTL）。
 // 地理位置解析异步执行，不阻塞登录响应
-async function registerSessionMeta(token, req) {
+async function registerSessionMeta(token: string, req: Request): Promise<void> {
   const ip = clientIp(req);
   const rawName =
     req.body && typeof req.body.deviceName === 'string' ? req.body.deviceName.trim() : '';
@@ -266,7 +279,7 @@ async function registerSessionMeta(token, req) {
 
 // 撤销单个会话：删 token + 移出索引 + 删元数据（logout / 设备删除 / 同设备去重共用）。
 // 同时彻底撤销关联的首方 SSO 令牌（共享 cookie）：登出后 cookie 不许再用满 TTL。
-async function revokeSession(token) {
+async function revokeSession(token: string): Promise<void> {
   await redis.del(token);
   await redis.srem(SESSION_INDEX_KEY, token);
   await redis.del(sessionHashKey(token));
@@ -277,7 +290,7 @@ async function revokeSession(token) {
 // 设备指纹去重：登录成功后仅保留最新一次会话。
 // 匹配条件 = clientIp 完全相同 + User-Agent 完全相同的字符串比对（ip / userAgent 字段）；
 // 元数据缺失的旧会话跳过；全程 try/catch，去重失败不影响登录成功返回
-async function dedupSameDeviceSessions(newToken, req) {
+async function dedupSameDeviceSessions(newToken: string, req: Request): Promise<void> {
   const ip = clientIp(req);
   const ua = String(req.headers['user-agent'] || '').slice(0, 300);
   const members = await redis.smembers(SESSION_INDEX_KEY);
@@ -293,8 +306,8 @@ async function dedupSameDeviceSessions(newToken, req) {
 }
 
 // verify 成功后节流更新最近活跃：60s 内同一 token 只写一次；历史会话（无元数据）自动补建最小元数据
-const lastSeenWrites = new Map(); // token -> ts
-async function touchSession(token, req) {
+const lastSeenWrites = new Map<string, number>(); // token -> ts
+async function touchSession(token: string, req: Request): Promise<void> {
   const now = Date.now();
   const last = lastSeenWrites.get(token);
   if (last && now - last < 60000) return;
@@ -324,7 +337,7 @@ async function touchSession(token, req) {
       resolveLocation(hashKey, ip);
     }
   } catch (e) {
-    console.error(`[auth-server] touchSession error: ${e.message}`);
+    console.error(`[auth-server] touchSession error: ${(e as Error).message}`);
   }
 }
 
@@ -335,10 +348,12 @@ async function touchSession(token, req) {
 const PENDING_FILE = path.join(DATA_DIR, 'totp-pending.json');
 const PENDING_TTL_MS = 300 * 1000; // 5 分钟
 
-function loadPending() {
+type PendingRecord = { secret: string; expiresAt: number };
+
+function loadPending(): PendingRecord | null {
   if (!fs.existsSync(PENDING_FILE)) return null;
   try {
-    const data = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8'));
+    const data = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8')) as Partial<PendingRecord>;
     if (!data || typeof data.secret !== 'string' || typeof data.expiresAt !== 'number') return null;
     if (Date.now() > data.expiresAt) {
       try {
@@ -348,20 +363,20 @@ function loadPending() {
       }
       return null;
     }
-    return data;
+    return data as PendingRecord;
   } catch {
     return null;
   }
 }
 
-function savePending(secret) {
+function savePending(secret: string): void {
   fs.mkdirSync(path.dirname(PENDING_FILE), { recursive: true });
   const tmp = `${PENDING_FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify({ secret, expiresAt: Date.now() + PENDING_TTL_MS }, null, 2));
   fs.renameSync(tmp, PENDING_FILE);
 }
 
-function deletePending() {
+function deletePending(): void {
   try {
     fs.unlinkSync(PENDING_FILE);
   } catch (e) {
@@ -370,7 +385,7 @@ function deletePending() {
 }
 
 // 原子写正式 secret（与模块 saveSecret 同款实现）
-function saveFormalSecret(base32Secret) {
+function saveFormalSecret(base32Secret: string): void {
   fs.mkdirSync(path.dirname(SECRET_FILE), { recursive: true });
   const tmp = `${SECRET_FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify({ secret: base32Secret }, null, 2));
@@ -378,7 +393,7 @@ function saveFormalSecret(base32Secret) {
 }
 
 // 复用 /api/verify 的 Redis 会话校验：header/query token → Redis GET 存在即通过，滑动续期
-async function requireSession(req) {
+async function requireSession(req: Request): Promise<string | null> {
   const token = tokenFrom(req);
   if (!token) return null;
   if (!redisAvailable()) return null;
@@ -388,25 +403,28 @@ async function requireSession(req) {
     await redis.expire(token, SESSION_TTL);
     return normalizeSubject(stored);
   } catch (err) {
-    console.error(`[auth-server] session check error: ${err.message}`);
+    console.error(`[auth-server] session check error: ${(err as Error).message}`);
     return null;
   }
 }
 
-function otpauthUriFor(secret) {
+function otpauthUriFor(secret: string): string {
   const label = encodeURIComponent(SSO_DISPLAY_NAME);
   return `otpauth://totp/${label}:${label}?secret=${secret}&issuer=${label}&period=30&digits=6&algorithm=SHA1`;
 }
 
 // 两阶段重置的**唯一实现**：对外端点（会话鉴权）与内部端点（内部令牌鉴权）共用，避免语义分叉。
 // 安全红线：reset 只写 pending、绝不覆盖正式 secret；confirm 必须 pending 验证码通过才转正。
-function performTotpReset() {
+type ResetResult = { status: number; body: { secret: string; otpauthUri: string; expiresIn: number } };
+type ConfirmResult = { status: number; body: { ok: true } | { code: string; message: string } };
+
+function performTotpReset(): ResetResult {
   const secret = base32Encode(crypto.randomBytes(20));
   savePending(secret);
   return { status: 200, body: { secret, otpauthUri: otpauthUriFor(secret), expiresIn: 300 } };
 }
 
-function performTotpConfirm(rawCode) {
+function performTotpConfirm(rawCode: unknown): ConfirmResult {
   const pending = loadPending();
   if (!pending) {
     return { status: 400, body: { code: 'no_pending', message: '没有待确认的 TOTP 重置' } };
@@ -440,7 +458,7 @@ app.post('/api/totp/confirm', async (req, res) => {
 });
 
 // POST /api/totp/setup —— 复用 auth.router（首次设置引导），限速/TOTP 逻辑不变
-app.use('/api/totp', auth.router);
+app.use('/api/totp', auth.router!);
 
 const loginLimiter = new RateLimiter({ maxFailures: 5, lockout: [60, 300, 900] });
 
@@ -482,19 +500,19 @@ app.post('/api/login', async (req, res) => {
     try {
       await dedupSameDeviceSessions(token, req); // 撤销同设备指纹旧会话（失败不影响登录）
     } catch (err) {
-      console.error(`[auth-server] login: dedup failed: ${err.message}`);
+      console.error(`[auth-server] login: dedup failed: ${(err as Error).message}`);
     }
   } catch (err) {
-    console.error(`[auth-server] login: redis SET failed: ${err.message}`);
+    console.error(`[auth-server] login: redis SET failed: ${(err as Error).message}`);
     return res.status(500).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
   }
   return res.json({ token, expiresIn: SESSION_TTL });
 });
 
 // /api/setup、/api/reset —— 兼容旧路径（auth.router 内的 /api/login 已被上方自定义路由覆盖）
-app.use('/api', auth.router);
+app.use('/api', auth.router!);
 
-function tokenFrom(req) {
+function tokenFrom(req: Request): string {
   const queryToken = req.query && req.query.token;
   if (queryToken) return String(queryToken).trim();
   // nginx 探针转发:父请求 query token 经 X-Auth-Token 头传递(<img> 等无 header 场景)
@@ -507,28 +525,30 @@ function tokenFrom(req) {
 // 接口令牌（API Token）：只存哈希，不存明文；固定过期、不滑动续期、不 touchSession。
 // 绝不 sadd 进 SESSION_INDEX_KEY、绝不动 admin:session: 前缀、不写设备元数据 hash，
 // 与「登录设备管理」完全隔离（本服务内只在 verify 和本函数里触达 api:token: 前缀）
-function sha256(str) {
+function sha256(str: unknown): string {
   return crypto.createHash('sha256').update(String(str)).digest('hex');
 }
 
 const API_TOKEN_PREFIX = 'api:token:';
 const API_TOKEN_USED_THROTTLE_MS = 3600 * 1000; // lastUsedAt 节流更新窗口（>1 小时才写回）
 
+type ApiTokenMeta = { name?: string; expiresAt?: number; lastUsedAt?: number; [k: string]: unknown };
+
 // 校验接口令牌：Redis GET api:token:<sha256(token)> 存在即有效（过期由 TTL 自动删除）。
 // 命中 → 解析 JSON → 返回 { ok, user: meta.name, exp }；解析失败/已过期按未命中返回 null
-async function verifyApiToken(token) {
+async function verifyApiToken(token: string): Promise<{ ok: true; user: string; exp: number } | null> {
   const key = API_TOKEN_PREFIX + sha256(token);
-  let raw;
+  let raw: string | null;
   try {
     raw = await redis.get(key);
   } catch (err) {
-    console.error(`[auth-server] verify: api token check error: ${err.message}`);
+    console.error(`[auth-server] verify: api token check error: ${(err as Error).message}`);
     return null;
   }
   if (!raw) return null;
-  let meta;
+  let meta: ApiTokenMeta;
   try {
-    meta = JSON.parse(raw);
+    meta = JSON.parse(raw) as ApiTokenMeta;
   } catch (e) {
     return null;
   }
@@ -542,7 +562,7 @@ async function verifyApiToken(token) {
       await redis.set(key, JSON.stringify(meta), 'EX', ttl);
     }
   } catch (err) {
-    console.error(`[auth-server] verify: api token lastUsed update error: ${err.message}`);
+    console.error(`[auth-server] verify: api token lastUsed update error: ${(err as Error).message}`);
   }
   return { ok: true, user: meta.name, exp: Number(meta.expiresAt) };
 }
@@ -586,7 +606,7 @@ app.get('/api/verify', async (req, res) => {
     res.setHeader("X-Auth-User", user);
     return res.json({ ok: true, user, exp });
   } catch (err) {
-    console.error(`[auth-server] verify: redis error: ${err.message}`);
+    console.error(`[auth-server] verify: redis error: ${(err as Error).message}`);
     return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
   }
 });
@@ -603,7 +623,7 @@ app.post('/api/logout', async (req, res) => {
     }
     return res.json({ ok: true, message: 'Session revoked' });
   } catch (err) {
-    console.error(`[auth-server] logout: redis error: ${err.message}`);
+    console.error(`[auth-server] logout: redis error: ${(err as Error).message}`);
     return res.status(503).json({ code: 'redis_unavailable', message: 'Session store unavailable' });
   }
 });
@@ -612,14 +632,27 @@ app.post('/api/logout', async (req, res) => {
 
 const TOKEN_ID_RE = /^[a-f0-9]{64}$/i;
 
+type SessionInfo = {
+  id: string;
+  deviceName: string;
+  ip: string;
+  location: string;
+  isLocal: boolean;
+  userAgent: string;
+  createdAt: number;
+  lastSeenAt: number;
+  expiresAt: number;
+  isCurrent: boolean;
+};
+
 // 收集会话列表（/api/sessions 与内部接口共用，保证返回结构完全一致）。
 // sub 非空时只返回属于该用户的会话（当前为单用户，预留多用户过滤）。
 // currentToken 非空时把对应会话标记 isCurrent；内部调用没有客户端令牌，传 null。
-async function collectSessions(currentToken, sub) {
+async function collectSessions(currentToken: string | null, sub: string | null): Promise<SessionInfo[]> {
   const nowSec = Math.floor(Date.now() / 1000);
   const members = await redis.smembers(SESSION_INDEX_KEY);
-  const sessions = [];
-  const stale = [];
+  const sessions: SessionInfo[] = [];
+  const stale: string[] = [];
   for (const t of members) {
     if (!TOKEN_ID_RE.test(t)) {
       stale.push(t); // 非法成员：移出索引
@@ -637,7 +670,7 @@ async function collectSessions(currentToken, sub) {
       await redis.del(sessionHashKey(t));
       continue;
     }
-    let meta;
+    let meta: Record<string, string>;
     try {
       meta = await redis.hgetall(sessionHashKey(t));
     } catch (e) {
@@ -690,7 +723,7 @@ app.get('/api/sessions', async (req, res) => {
     const sessions = await collectSessions(currentToken, null);
     return res.json({ sessions });
   } catch (e) {
-    console.error(`[auth-server] sessions list error: ${e.message}`);
+    console.error(`[auth-server] sessions list error: ${(e as Error).message}`);
     return res.status(500).json({ code: 'server_error', message: '会话列表查询失败' });
   }
 });
@@ -740,7 +773,7 @@ app.put('/api/sessions/:id/name', async (req, res) => {
     await redis.expire(hashKey, SESSION_TTL);
     return res.json({ ok: true, deviceName });
   } catch (e) {
-    console.error(`[auth-server] sessions rename error: ${e.message}`);
+    console.error(`[auth-server] sessions rename error: ${(e as Error).message}`);
     return res.status(500).json({ code: 'server_error', message: '重命名失败' });
   }
 });
@@ -762,7 +795,7 @@ app.delete('/api/sessions/:id', async (req, res) => {
     await revokeSession(id);
     return res.json({ ok: true });
   } catch (e) {
-    console.error(`[auth-server] sessions delete error: ${e.message}`);
+    console.error(`[auth-server] sessions delete error: ${(e as Error).message}`);
     return res.status(500).json({ code: 'server_error', message: '删除会话失败' });
   }
 });
@@ -771,13 +804,13 @@ app.delete('/api/sessions/:id', async (req, res) => {
 // 供 admin-server 等本机服务使用：按 sub 参数定位用户，不再依赖客户端令牌。
 // 不匹配 X-Internal-Token 一律 401；令牌值绝不写日志。
 
-function internalAuthOk(req, res) {
+function internalAuthOk(req: Request, res: Response): boolean {
   if (internalTokenMatches(req)) return true;
   res.status(401).json({ code: 'unauthorized', message: 'Invalid internal token' });
   return false;
 }
 
-function internalSub(req) {
+function internalSub(req: Request): string {
   return String((req.query && req.query.sub) || '').trim();
 }
 
@@ -793,7 +826,7 @@ app.get('/api/internal/sessions', async (req, res) => {
     const sessions = await collectSessions(null, sub);
     return res.json({ sessions });
   } catch (e) {
-    console.error(`[auth-server] internal sessions list error: ${e.message}`);
+    console.error(`[auth-server] internal sessions list error: ${(e as Error).message}`);
     return res.status(500).json({ code: 'server_error', message: '会话列表查询失败' });
   }
 });
@@ -843,7 +876,7 @@ app.put('/api/internal/sessions/:id/name', async (req, res) => {
     await redis.expire(hashKey, SESSION_TTL);
     return res.json({ ok: true, deviceName });
   } catch (e) {
-    console.error(`[auth-server] internal sessions rename error: ${e.message}`);
+    console.error(`[auth-server] internal sessions rename error: ${(e as Error).message}`);
     return res.status(500).json({ code: 'server_error', message: '重命名失败' });
   }
 });
@@ -869,7 +902,7 @@ app.delete('/api/internal/sessions/:id', async (req, res) => {
     await revokeSession(id);
     return res.json({ ok: true });
   } catch (e) {
-    console.error(`[auth-server] internal sessions delete error: ${e.message}`);
+    console.error(`[auth-server] internal sessions delete error: ${(e as Error).message}`);
     return res.status(500).json({ code: 'server_error', message: '删除会话失败' });
   }
 });
@@ -877,7 +910,7 @@ app.delete('/api/internal/sessions/:id', async (req, res) => {
 // 内部 TOTP 重置：身份由可信本机服务经 ?sub= 断言，不走 requireSession。
 // 与对外端点共用 performTotpReset / performTotpConfirm —— 两阶段语义完全一致，绝不复刻实现。
 // 单用户实例：sub 必须存在且等于本实例用户，否则不处理。
-function internalTotpSub(req, res) {
+function internalTotpSub(req: Request, res: Response): boolean {
   const sub = internalSub(req);
   if (!sub) {
     res.status(400).json({ code: 'invalid_sub', message: '缺少 sub 参数' });
@@ -908,7 +941,7 @@ app.post('/api/internal/totp/confirm', (req, res) => {
 
 /* ============ OIDC Provider（OAuth 2.1 + OIDC Core 1.0） ============ */
 
-const oidc = createOidcProvider({
+const oidc: OidcProvider = createOidcProvider({
   redis,
   redisAvailable,
   dataDir: DATA_DIR,
