@@ -20,7 +20,7 @@
 
 - Node 24 + Express 4，**CommonJS 单文件**
 - Redis（`127.0.0.1:6379`）—— 会话唯一存储
-- `lib/totp-auth/`：零依赖自研模块（`index.js` 工厂 + `lib/totp.js` / `lib/rate-limit.js` / `lib/jwt.js`）
+- `lib/totp-auth/`：零依赖自研模块，**保持 JS 不迁移**（被 admin-server 以 `file:` 依赖共用）：`index.js` 工厂 + `lib/totp.js` / `lib/rate-limit.js` / `lib/jwt.js`，另配手写 `index.d.ts` / `lib/totp.d.ts` / `lib/rate-limit.d.ts` 供 TS 侧引用
 - 无数据库、无构建步骤
 
 > `lib/totp-auth` 同时以软链方式暴露给 `../admin-server`（`file:../totp-auth`）。**改这个目录会同时影响认证中心和 admin-server**，改前全局搜引用。
@@ -28,12 +28,12 @@
 ## 目录结构
 
 ```
-src/index.js          # 登录页 + 全部路由（单文件）
+src/index.ts          # 登录页 + 全部路由（单文件）
 src/oidc/             # OIDC Provider：discovery/authorize/token/userinfo/jwks/introspect/end_session/revoke
-├── index.js          # createOidcProvider() 工厂（挂到 app 根路径）
-├── keys.js           # ES256 密钥库（oidc-keys.json / JWKS / kid=thumbprint）
-├── clients.js        # 客户端注册表（clients.json / redirect_uri 精确匹配）
-└── util.js           # base64url / PKCE S256 / cookie / 哈希
+├── index.ts          # createOidcProvider() 工厂（挂到 app 根路径）
+├── keys.ts           # ES256 密钥库（oidc-keys.json / JWKS / kid=thumbprint）
+├── clients.ts        # 客户端注册表（clients.json / redirect_uri 精确匹配）
+└── util.ts           # base64url / PKCE S256 / cookie / 哈希
 lib/totp-auth/        # TOTP 模块：生成/验证/限速/JWT
 ├── index.js          # createTotpAuth() 工厂（含 auth.router 内置路由）
 └── lib/{totp,rate-limit,jwt}.js
@@ -50,7 +50,7 @@ jwt-secret            # JWT 密钥（本地，不入库）
 
 ```bash
 npm install
-node src/index.js           # 监听 3200
+node src/index.ts           # 监听 3200
 systemctl restart auth-server
 journalctl -u auth-server -n 100 --no-pager
 ```
