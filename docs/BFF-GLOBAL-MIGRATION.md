@@ -32,7 +32,7 @@
      "client_id": "quotahub",
      "client_secret": "<随机 32 字节 hex>",
      "type": "confidential",
-     "redirect_uris": ["https://quotahub.example.com/sso/callback"]
+     "redirect_uris": ["https://quotahub.<your-domain>/sso/callback"]
    }
    ```
    （`v2link` / `admin` 同理；`redirect_uris` **精确匹配**，不加通配符）
@@ -74,24 +74,24 @@ POST /sso/logout    撤站内会话 + 调 <auth>/revoke → 清 cookie
 ```yaml
 # /etc/ssogate/config.yaml
 listen: 127.0.0.1:18910          # 由 nginx 反代进来
-issuer: https://auth.example.com
+issuer: https://auth.<your-domain>
 sites:
   - id: android                  # client_id
     secret_file: /etc/ssogate/android.secret
     cookies: sg_android          # 站点自己的会话 cookie
     upstream: http://127.0.0.1:8000
     user_header: X-Auth-User
-    redirect_uri: https://android.example.com/sso/callback
+    redirect_uri: https://android.<your-domain>/sso/callback
   - id: desktop
     secret_file: /etc/ssogate/desktop.secret
     cookies: sg_desktop
     upstream: http://127.0.0.1:3999
-    redirect_uri: https://desktop.example.com/sso/callback
+    redirect_uri: https://desktop.<your-domain>/sso/callback
   - id: linux
     secret_file: /etc/ssogate/linux.secret
     cookies: sg_linux
     upstream: http://127.0.0.1:7901
-    redirect_uri: https://linux.example.com/sso/callback
+    redirect_uri: https://linux.<your-domain>/sso/callback
 ```
 
 行为：
@@ -121,7 +121,7 @@ sites:
 1. **撤掉全部 `auth_request /auth-check`**（A 组三站 ✓ B 组三站 ✓ 主域下的 `/api/admin/*`、`/api/blog/admin/*` ✓）
 2. A 组：`location /sso/` 与 `/api/` 直接反代到站点后端（后端自己管鉴权）
 3. B 组：`location /` 反代到 `ssogate`（`127.0.0.1:18910`），由网关管鉴权
-4. **不再需要共享 cookie** → 认证中心的 `auth_session` 只作用于 `auth.example.com` 自己
+4. **不再需要共享 cookie** → 认证中心的 `auth_session` 只作用于 `auth.<your-domain>` 自己
 5. 保留：老登录页白名单 ✓ 证书 ✓ 精确 location 不互踩 ✓
 
 ## 8. 验收标准（逐站，脚本化 ✓）

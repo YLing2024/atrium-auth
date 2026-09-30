@@ -124,7 +124,7 @@ nginx（既有，逐站改造）                 证书、路由到 Gateway、�
 | 站点 | mode | 业务侧要改什么 |
 |---|---|---|
 | `quotahub`（:5300） | `proxy`（有 API） | **删掉 P2 加的 4 个 SSO 端点和前端残留**（回归零认证代码）；其余业务不动 |
-| `v2`（真域名 `v2.example.com`；:7897 + xray :7895） | `proxy` | 删 `frontend/src/lib/sso.ts` 及 token 逻辑 |
+| `v2`（真域名 `v2.<your-domain>`；:7897 + xray :7895） | `proxy` | 删 `frontend/src/lib/sso.ts` 及 token 逻辑 |
 | `admin`（admin-server :3100 + admin-web） | `proxy` | 删 `admin-web/src/api.js` 的 token 存取与 401 跳转；后端探针通道保留为第二层 |
 | `android`（ws-scrcpy :8000） | `protect` | **零改动**（连代码都不碰） |
 | `desktop`（KasmVNC :3999） | `protect` | **零改动**（KasmVNC 自己的口令保留为第二层） |

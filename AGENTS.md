@@ -14,7 +14,7 @@
 - TOTP **两阶段重置**（pending secret 验证通过才转正，永远不会把已登录的人锁在外面）
 - 按 IP 阶梯限速防爆破
 
-监听 `127.0.0.1:3200`（systemd `auth-server.service`），对外域名 `auth.example.com`。
+监听 `127.0.0.1:3200`（systemd `auth-server.service`）；对外域名由部署决定，不写进仓库。
 
 ## 技术栈
 
@@ -132,7 +132,7 @@ app.use(oidc.router)           ← OIDC 路由挂根路径（/authorize /token .
 - **redirect_uri 必须与注册值字符串精确相等**（不许前缀/通配）——授权端点第一安全边界。
 - **id_token 与 access_token 只准 ES256**（P-256，带 `kid`，共用 `oidc-keys.json`）；禁止 HS256。access_token 虽为 JWT，**撤销仍以 Redis 哈希记录为准**（不许"签名有效就永远有效"）；refresh / sso token 只存哈希。
 - 身份只有一个来源：`SSO_SUBJECT`（展示名 `SSO_DISPLAY_NAME`）。OIDC 路径与 `/api/verify` 必须给出**完全一致**的身份；历史标签 `HomeAuth` 仅是 cookie 名 / 旧 Redis 值，读取时归一化为 `SSO_SUBJECT`。
-- 不要把 `auth.example.com`、服务器 IP 等私有地址写进任何源代码；OIDC issuer 走 `ISSUER` 环境变量。
+- 不要把真实域名、服务器 IP 等私有地址写进任何源代码；OIDC issuer 走 `ISSUER` 环境变量。
 
 ## 已知坑
 

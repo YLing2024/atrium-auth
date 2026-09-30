@@ -91,7 +91,7 @@ Auth0 还有一句直接对应本服务器场景的结论：
 > **no tokens are needed**. OAuth adds additional attack vectors without providing any additional value and should
 > be avoided in favor of a traditional cookie-based approach."
 
-本服务器所有站点都在同一站点（`example.com`）下 → 正好落在这句话里 ✓
+本服务器所有站点都在同一站点（`<your-domain>`）下 → 正好落在这句话里 ✓
 
 ---
 
@@ -154,7 +154,7 @@ GET /api/session → 返回 { access_token, expires_at }（凭 HttpOnly cookie �
 
 ```
 浏览器 → 站点 nginx ──auth_request──> 认证中心 /api/verify ──> 200 + X-Auth-User
-       ↑ 请求自动带 IdP 的 HttpOnly cookie（Domain=.example.com）
+       ↑ 请求自动带 IdP 的 HttpOnly cookie（Domain=.<your-domain>）
 未登录 → 302 → /authorize?client_id=<本站>&redirect_uri=…  → 登录 → 回站点（URL 里没有 token）
 ```
 
@@ -184,5 +184,5 @@ Flutter（home-admin）、脚本、webhook：**没有浏览器**，就没有 coo
 1. **cookie 不是"额外的坏东西"** ✗ —— 浏览器场景里它是"登录态记在哪"的答案；
    换成"服务器换 token"只是把 token 从浏览器赶走 ✓ 那个"记在哪"的问题依然要用 cookie 或 JS 存储来答 ✓
 2. **RFC 的答案是 cookie** ✓：BFF 与中介后端**两种**架构都用 cookie 记会话；唯一不用 cookie 的是纯 SPA 方案 C ✗ 而那正是"token 落浏览器/被 XSS 偷"的那一档 ✗
-3. **本站所有站点同在一个站点（`example.com`）下** → Auth0 的结论直接适用：**根本不需要 token 到前端** ✓
+3. **本站所有站点同在一个站点（`<your-domain>`）下** → Auth0 的结论直接适用：**根本不需要 token 到前端** ✓
    前端只需要一个 `/api/me` 知道"我是谁" ✓ 其余全由后端/nginx 处理 ✓

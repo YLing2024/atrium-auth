@@ -2,7 +2,7 @@
 
 > ⚠️ 已被 docs/SSO-GATEWAY-SPEC.md 取代（2026-09-28 起全站走 Auth Gateway）。本文仅存历史设计记录。
 
-> 2026-09-28 Hermes。都以本服务器真实的组件和域名画：浏览器 / 站点 nginx / 站点后端 / 认证中心（auth.example.com，:3200）。
+> 2026-09-28 Hermes。都以本服务器真实的组件和域名画：浏览器 / 站点 nginx / 站点后端 / 认证中心（auth.<your-domain>，:3200）。
 
 ---
 
@@ -17,11 +17,11 @@ sequenceDiagram
     participant N as 站点 nginx
     participant A as 认证中心
 
-    B->>N: ① GET https://android.example.com/
+    B->>N: ① GET https://android.<your-domain>/
     Note over N: ② 探针 auth_request → 认证中心 /api/verify（此时没有 cookie）
     N-->>B: ③ 401 → 页面 location @auth_redirect
 
-    B->>A: ④ GET /authorize?client_id=android&redirect_uri=https://android.example.com/&response_type=code&scope=openid
+    B->>A: ④ GET /authorize?client_id=android&redirect_uri=https://android.<your-domain>/&response_type=code&scope=openid
     Note over A: 无会话
     A-->>B: ⑤ 302 → 登录页
     B->>A: ⑥ 输入 TOTP，POST 登录
