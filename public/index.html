@@ -47,7 +47,26 @@
     color: #171512;
     transition: border-color 0.14s ease;
   }
+  .code-wrap { position: relative; }
   input#code:focus { border-bottom-color: #a05b0c; }
+  .code-toggle {
+    position: absolute;
+    right: 0;
+    bottom: 12px;
+    background: none;
+    border: none;
+    margin: 0;
+    padding: 4px 2px 4px 10px;
+    width: auto;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: #6e675f;
+    cursor: pointer;
+    transition: color 0.14s ease;
+  }
+  .code-toggle:hover { background: none; color: #a05b0c; }
   button {
     width: 100%;
     margin-top: 32px;
@@ -96,8 +115,11 @@
   <div class="sub">Single Sign-On</div>
 
   <label for="code">Authenticator Code</label>
-  <input id="code" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code"
-         maxlength="6" placeholder="·····" autofocus>
+  <div class="code-wrap">
+    <input id="code" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code"
+           maxlength="6" placeholder="·····" autofocus>
+    <button type="button" class="code-toggle" id="toggle" aria-label="显示验证码" aria-pressed="false">显示</button>
+  </div>
   <div class="error" id="error"></div>
   <button id="btn" type="button">Login</button>
 
@@ -156,6 +178,17 @@ var code = document.getElementById('code');
 var btn = document.getElementById('btn');
 var error = document.getElementById('error');
 var setup = document.getElementById('setup');
+var toggle = document.getElementById('toggle');
+
+// 验证码默认掩码显示，点「显示 / 隐藏」手动切换（防止旁人瞄到 / 录屏泄露）
+toggle.addEventListener('click', function () {
+  var shown = code.type === 'text';
+  code.type = shown ? 'password' : 'text';
+  toggle.textContent = shown ? '显示' : '隐藏';
+  toggle.setAttribute('aria-label', shown ? '显示验证码' : '隐藏验证码');
+  toggle.setAttribute('aria-pressed', shown ? 'false' : 'true');
+  code.focus();
+});
 
 function showError(msg) { error.textContent = msg; error.classList.add('show'); }
 function hideError() { error.classList.remove('show'); }
