@@ -1,3 +1,5 @@
+[简体中文](README.md) ｜ [English](README.en.md)
+
 # atrium-auth
 
 自建统一认证中心（OIDC Provider）：一个 TOTP 动态码，管住全家桶所有站点的登录。
@@ -18,7 +20,7 @@
 ```bash
 npm install
 npm start            # = node src/index.ts，默认监听 0.0.0.0:3200
-npm run check        # = tsc --noEmit（类型检查）
+npm run check        # = typecheck（tsc --noEmit）+ lint + test
 ```
 
 需要本机 Redis（默认 `127.0.0.1:6379`）。首次启动会在 `DATA_DIR` 自动生成 `oidc-keys.json`、`jwt-secret`、`internal-token`。
