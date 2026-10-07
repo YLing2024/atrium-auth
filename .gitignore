@@ -11,3 +11,6 @@ clients.json
 PROJECT_MEMORY.md
 jwt-secret
 internal-token
+
+# 需求/任务文档（只存本机，不提交）
+docs/REQUIREMENTS-*.md

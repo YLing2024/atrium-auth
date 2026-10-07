@@ -43,6 +43,7 @@ npm run check        # = typecheck（tsc --noEmit）+ lint + test
 | `INTERNAL_TOKEN_FILE` | `<DATA_DIR>/internal-token` | 内部接口共享令牌文件（0600，自动生成） |
 | `INTERNAL_TOKEN` | 无 | 直接指定内部令牌值，覆盖文件 |
 | `AUTH_GEOIP_URL` | `https://ip-api.com/json/{ip}?fields=status,country,regionName,city` | 登录来源解析接口 |
+| `ALLOWED_REDIRECT_ROOTS` | 空（仅同源） | 登录页 `?redirect=` 允许跨域回跳的域名根，逗号分隔（示例 `example.com,example.org`）；只有这些根域及其子域可回跳，未配置时仅同源、拒绝跨域并提示 |
 
 ## 接口
 
@@ -51,6 +52,7 @@ npm run check        # = typecheck（tsc --noEmit）+ lint + test
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | GET | `/auth` | 无 | 登录页（`?redirect=` 回跳，带白名单） |
+| GET | `/config.js` | 无 | 登录页运行期配置：仅注入回跳白名单域名根（`ALLOWED_REDIRECT_ROOTS`），不含凭据 |
 | POST | `/api/login` | 无 | `{code}` → 验 TOTP → 签发 Redis 会话 token |
 | GET | `/api/verify` | 无 | **兼容保留**：会话 token / 首方 SSO 令牌 / API token，通过返回 `X-Auth-User` 并刷新 TTL |
 | POST | `/api/logout` | 无 | `{token}` 或 Bearer → 删会话（并连带撤销关联 SSO 令牌） |
@@ -81,6 +83,8 @@ OIDC（挂在根路径，issuer 取 `ISSUER`）：
 
 由 systemd 单元 `auth-server.service` 托管，监听 `127.0.0.1:3200`，工作目录为项目根。
 nginx 只做 TLS 与路由：登录态由独立项目 **Auth Gateway** 接管，站点 nginx 把 `/_auth/*` 转给网关（`127.0.0.1:18920`），由网关向后端注入 `X-Auth-User`；OIDC 各端点由网关在服务端经 loopback 调用。不再使用 nginx `auth_request` 探针或 `/auth-check`。真实域名与对外地址一律由 `ISSUER` / 反向代理配置提供，不写进代码。
+
+登录页 `?redirect=` 的跨域回跳白名单由环境变量 `ALLOWED_REDIRECT_ROOTS`（逗号分隔域名根，示例 `example.com,example.org`）提供，服务端经 `GET /config.js` 注入登录页（`window.__AUTH_CONFIG__.allowedRedirectRoots`）；只有这些根域及其子域可跨域回跳。未配置时只允许同源回跳，跨域目标被拒并给出可读提示——不会回退成允许任意域。
 
 ## 认证与安全
 

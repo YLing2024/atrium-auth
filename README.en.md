@@ -43,6 +43,7 @@ A local Redis is required (default `127.0.0.1:6379`). On first start it generate
 | `INTERNAL_TOKEN_FILE` | `<DATA_DIR>/internal-token` | Shared token file for internal endpoints (0600, auto-generated) |
 | `INTERNAL_TOKEN` | none | Explicit internal token value, overriding the file |
 | `AUTH_GEOIP_URL` | `https://ip-api.com/json/{ip}?fields=status,country,regionName,city` | Login source resolution endpoint |
+| `ALLOWED_REDIRECT_ROOTS` | empty (same-origin only) | Domain roots allowed as cross-origin `?redirect=` targets on the login page, comma-separated (example `example.com,example.org`); only these roots and their subdomains may be used. When unset, only same-origin returns are allowed and cross-origin targets are rejected with a readable notice |
 
 ## Interfaces
 
@@ -51,6 +52,7 @@ Login and compatibility endpoints:
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/auth` | none | login page (`?redirect=` return, with a whitelist) |
+| GET | `/config.js` | none | login page runtime config: injects only the redirect whitelist roots (`ALLOWED_REDIRECT_ROOTS`), no credentials |
 | POST | `/api/login` | none | `{code}` → verify TOTP → issue a Redis session token |
 | GET | `/api/verify` | none | **kept for compatibility**: session token / first-party SSO token / API token; on success returns `X-Auth-User` and refreshes the TTL |
 | POST | `/api/logout` | none | `{token}` or Bearer → delete the session (and revoke associated SSO tokens) |
@@ -81,6 +83,8 @@ Internal endpoints (local services only, shared token `X-Internal-Token`, not se
 
 Managed by the systemd unit `auth-server.service`, listening on `127.0.0.1:3200` with the project root as the working directory.
 nginx only does TLS and routing: the login state is handled by the separate project **Auth Gateway**, where site nginx forwards `/_auth/*` to the gateway (`127.0.0.1:18920`), which injects `X-Auth-User` into the backend; OIDC endpoints are called by the gateway server-side over loopback. The nginx `auth_request` probe and `/auth-check` are no longer used. Real domains and public addresses are always provided by `ISSUER` / reverse proxy configuration and are never written into code.
+
+The login page's cross-origin `?redirect=` whitelist comes from the `ALLOWED_REDIRECT_ROOTS` environment variable (comma-separated domain roots, example `example.com,example.org`), injected into the page via `GET /config.js` (`window.__AUTH_CONFIG__.allowedRedirectRoots`); only those roots and their subdomains may be used. When unset, only same-origin returns are allowed and cross-origin targets are rejected with a readable notice — it never falls back to allowing any domain.
 
 ## Authentication and security
 

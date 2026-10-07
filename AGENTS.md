@@ -62,6 +62,7 @@ journalctl -u auth-server -n 100 --no-pager
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | GET | `/auth` | 无 | 登录页（`?redirect=` 登录后回跳） |
+| GET | `/config.js` | 无 | 登录页运行期配置：仅注入回跳白名单域名根（`ALLOWED_REDIRECT_ROOTS`），不含凭据 |
 | POST | `/api/login` | 无 | `{code}` → 验 TOTP → 签发 token 存 Redis |
 | GET | `/api/verify` | 无 | **兼容保留**（网关走 `/_auth/*` 与 OIDC 端点，不再走探针）：`?token=` / `X-Auth-Token` / Bearer → 会话令牌**或首方 SSO 令牌**验证 + 刷新 TTL，通过返回 `X-Auth-User`（= `SSO_SUBJECT`） |
 | POST | `/api/logout` | 无 | `{token}` → 删会话 |
@@ -123,6 +124,7 @@ app.use(oidc.router)           ← OIDC 路由挂根路径（/authorize /token .
 | `JWT_SECRET` | 读 `jwt-secret` 文件 | 签发密钥 |
 | `INTERNAL_TOKEN_FILE` | `<DATA_DIR>/internal-token` | 内部接口共享令牌文件（0600 自动生成；`INTERNAL_TOKEN` 可直接覆盖值） |
 | `AUTH_GEOIP_URL` | `https://ipwho.is/{ip}?fields=success,country,region,city` | 登录来源解析 |
+| `ALLOWED_REDIRECT_ROOTS` | 空（仅同源） | 登录页允许回跳的域名根，逗号分隔（示例 `example.com,example.org`）：只有这些根域及其子域可跨域回跳；未配置时仅同源回跳，绝不回退成允许任意域。**不得写入真实域名** |
 
 ## 安全红线
 
