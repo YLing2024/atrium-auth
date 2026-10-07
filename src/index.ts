@@ -41,6 +41,32 @@ const REDIS_DB = Number(process.env.REDIS_DB || 0);
 // OIDC issuer：一律取环境变量 ISSUER，默认本机 3200（不得硬编码真实域名）
 const OIDC_ISSUER = process.env.ISSUER || 'http://127.0.0.1:3200';
 
+// 登录页 ?redirect= 跨域回跳白名单：逗号分隔的域名根（示例：example.com,example.org）。
+// 语义与旧前端正则一致——只有这些根域及其子域允许作为跨域回跳目标。
+// 未配置时为空数组：前端只允许同源回跳，绝不回退成「允许任意域」。源码 / 仓库内不得写真实域名。
+function parseAllowedRedirectRoots(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const out: string[] = [];
+  for (const part of String(raw).split(',')) {
+    // 容忍误填 `*.` 前缀 / 前导点；只接受纯域名形态，其余丢弃（防注入、防误配协议/路径/端口）
+    const root = part.trim().toLowerCase().replace(/^\*\./, '').replace(/^\.+/, '');
+    if (
+      !root ||
+      !/^[a-z0-9.-]+$/.test(root) ||
+      root.includes('..') ||
+      root.startsWith('-') ||
+      root.endsWith('-') ||
+      root.endsWith('.')
+    ) {
+      continue;
+    }
+    if (!out.includes(root)) out.push(root);
+  }
+  return out;
+}
+
+const ALLOWED_REDIRECT_ROOTS = parseAllowedRedirectRoots(process.env.ALLOWED_REDIRECT_ROOTS);
+
 function loadOrCreateJwtSecret(): string {
   if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
   if (fs.existsSync(JWT_SECRET_FILE)) return fs.readFileSync(JWT_SECRET_FILE, 'utf8').trim();
@@ -119,6 +145,17 @@ function redisAvailable(): boolean {
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json());
+
+// GET /config.js —— 登录页运行期配置：只含回跳白名单（域名根），不含任何凭据 / 密钥。
+// 用同步 <script> 注入，避免登录页启动时 fetch 配置的竞态；未配置时返回空数组（前端仅同源回跳）。
+app.get('/config.js', (_req, res) => {
+  res
+    .type('application/javascript')
+    .set('Cache-Control', 'no-store')
+    .send(
+      `window.__AUTH_CONFIG__ = ${JSON.stringify({ allowedRedirectRoots: ALLOWED_REDIRECT_ROOTS })};\n`
+    );
+});
 
 // 取客户端 IP：nginx 反代时 req.ip 恒为 127.0.0.1（trust proxy 未开），
 // 故优先取 x-forwarded-for 第一段（最贴近真实客户端）→ x-real-ip → req.ip
