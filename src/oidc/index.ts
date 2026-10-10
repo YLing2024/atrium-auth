@@ -44,6 +44,10 @@ const RTCHAIN_PREFIX = 'oidc:rtchain:';
 const SSO_PREFIX = 'oidc:sso:';
 // 来源会话哈希 → 关联 SSO 令牌哈希集合（登出/删设备时反向彻底撤销共享 cookie）
 const SSO_SESSION_INDEX_PREFIX = 'oidc:sso-session:';
+// sid（同一次登录）→ 该次登录签发的全部令牌哈希集合（at / rt / sso），供整体撤销
+const SID_PREFIX = 'oidc:sid:';
+// sid 索引 TTL 取 access / refresh 中较大者：refresh 链 30 天内都能被找回并整体撤销
+const SID_TTL = Math.max(ACCESS_TTL, REFRESH_TTL);
 
 type RedisClient = InstanceType<typeof import('ioredis').default>;
 type KeyStoreInstance = InstanceType<KeysExports['KeyStore']>;
@@ -60,6 +64,10 @@ export type OidcOptions = {
   loginPagePath: string;
   sessionTtl?: number;
   cookieName?: string;
+  // 撤销后向网关 loopback 端点发 back-channel 通知（异步、尽力而为）。
+  // 地址与内部令牌均由环境 / 调用方注入；未配置则跳过通知（不硬编码任何真实域名）。
+  backchannelUrl?: string;
+  internalToken?: string;
 };
 
 export type DiscoveryDoc = {
@@ -166,6 +174,10 @@ export type OidcProvider = {
   // 供 /api/verify 与 revokeSession 复用（SSO 令牌双向兼容 / 彻底撤销）
   verifySsoToken: (token: string) => Promise<{ sub: string; exp: number } | null>;
   revokeSsoForToken: (token: string) => Promise<void>;
+  // 全局登出：按 sid 整体撤销 + 反查 token 的 sid + 向网关发 back-channel 通知
+  revokeSid: (sid: string | undefined) => Promise<void>;
+  sidForToken: (token: string) => Promise<{ sid: string; sub: string } | null>;
+  notifyBackchannel: (sid: string, sub: string) => Promise<void>;
   // 供测试/诊断
   _internal: {
     exchangeCode: (params: ExchangeParams) => Promise<TokenSet>;
@@ -365,6 +377,7 @@ function createOidcProvider(opts: OidcOptions): OidcProvider {
       } catch (e) {
         /* 索引续期失败不影响 SSO 本身 */
       }
+      await registerSidToken(session.sid, h);
       return session.raw;
     }
     const token = randomToken(32);
@@ -385,6 +398,7 @@ function createOidcProvider(opts: OidcOptions): OidcProvider {
       await redis.sadd(idxKey, h);
       await redis.expire(idxKey, sessionTtl);
     }
+    await registerSidToken(rec.sid, h);
     return token;
   }
 
@@ -430,6 +444,110 @@ function createOidcProvider(opts: OidcOptions): OidcProvider {
     }
   }
 
+  // ── 按 sid 分组：登记与整体撤销 ──────────────────────────────────────────
+
+  // 把「本次登录(sid)签发的一个令牌哈希」登记进 sid 索引。sid 为空则跳过，
+  // 绝不把无 sid 的令牌归拢到一个空 key 上。
+  async function registerSidToken(sid: string | undefined, hash: string): Promise<void> {
+    if (!sid || !hash || !redisAvailable()) return;
+    try {
+      const key = SID_PREFIX + sid;
+      await redis.sadd(key, hash);
+      await redis.expire(key, SID_TTL);
+    } catch (err) {
+      console.error(`[oidc] sid register error: ${(err as Error).message}`);
+    }
+  }
+
+  // 整体撤销某次登录(sid)签发的全部令牌：删除 at / rt（整条 refresh 链）/ sso 记录，
+  // 最后删除 sid 索引本身。幂等：无记录时无副作用。
+  async function revokeSid(sid: string | undefined): Promise<void> {
+    if (!sid || !redisAvailable()) return;
+    try {
+      const key = SID_PREFIX + sid;
+      const members = await redis.smembers(key);
+      for (const h of members) {
+        await redis.del(AT_PREFIX + h);
+        const rtRaw = await redis.get(RT_PREFIX + h);
+        if (rtRaw) {
+          let chain = '';
+          try {
+            chain = (JSON.parse(rtRaw) as RefreshRecord).chain;
+          } catch {
+            /* 记录损坏时至少删掉这一条 */
+          }
+          await revokeChain(chain);
+        }
+        await redis.del(RT_PREFIX + h); // chain 缺失/损坏时的兜底
+        await redis.del(SSO_PREFIX + h);
+      }
+      await redis.del(key);
+    } catch (err) {
+      console.error(`[oidc] sid revoke error: ${(err as Error).message}`);
+    }
+  }
+
+  // 由任意令牌反查其 sid 与 sub：access / refresh / sso 直接命中；
+  // 旧登录会话（无 sid）经反向索引找到关联的 SSO 令牌再取 sid。查不到返回 null（不猜）。
+  async function sidForToken(token: string): Promise<{ sid: string; sub: string } | null> {
+    if (!token || !redisAvailable()) return null;
+    const h = sha256hex(token);
+    try {
+      const atRaw = await redis.get(AT_PREFIX + h);
+      if (atRaw) {
+        const a = JSON.parse(atRaw) as AccessRecord;
+        return a.sid ? { sid: a.sid, sub: normalizeSub(a.sub) } : null;
+      }
+      const rtRaw = await redis.get(RT_PREFIX + h);
+      if (rtRaw) {
+        const r = JSON.parse(rtRaw) as RefreshRecord;
+        return r.sid ? { sid: r.sid, sub: normalizeSub(r.sub) } : null;
+      }
+      const ssoRaw = await redis.get(SSO_PREFIX + h);
+      if (ssoRaw) {
+        const s = JSON.parse(ssoRaw) as SsoRecord;
+        return s.sid ? { sid: s.sid, sub: normalizeSub(s.sub) } : null;
+      }
+      const members = await redis.smembers(SSO_SESSION_INDEX_PREFIX + h);
+      for (const m of members) {
+        const raw = await redis.get(SSO_PREFIX + m);
+        if (!raw) continue;
+        try {
+          const s = JSON.parse(raw) as SsoRecord;
+          if (s.sid) return { sid: s.sid, sub: normalizeSub(s.sub) };
+        } catch {
+          /* 跳过损坏记录 */
+        }
+      }
+    } catch (err) {
+      console.error(`[oidc] sid lookup error: ${(err as Error).message}`);
+    }
+    return null;
+  }
+
+  // back-channel 通知网关：某次登录(sid)已整体撤销，请让该 sid 下的网关会话全部失效。
+  // 异步、尽力而为：≤2s 超时，失败重试一次，最终失败只记日志——绝不影响用户回跳、绝不抛给用户。
+  const backchannelUrl = String(opts.backchannelUrl || '').trim();
+  const internalToken = String(opts.internalToken || '');
+  async function notifyBackchannel(sid: string, sub: string): Promise<void> {
+    if (!sid || !backchannelUrl || !internalToken) return;
+    const body = JSON.stringify({ sid, sub });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const res = await fetch(backchannelUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Internal-Token': internalToken },
+          body,
+          signal: AbortSignal.timeout(2000),
+        });
+        if (res.status >= 200 && res.status < 300) return;
+      } catch {
+        /* 网络错误 / 超时：进入重试 */
+      }
+    }
+    console.warn('[oidc] backchannel notify failed (gateway endpoint unreachable or rejecting)');
+  }
+
   function cookieHeader(value: string, maxAge: number, domain: string | null | undefined): string {
     const parts = [`${cookieName}=${value}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Max-Age=${maxAge}`];
     if (secureCookies) parts.push('Secure');
@@ -473,6 +591,7 @@ function createOidcProvider(opts: OidcOptions): OidcProvider {
       'EX',
       ACCESS_TTL
     );
+    await registerSidToken(sid, sha256hex(accessToken));
 
     const idClaims: JwtPayload = {
       iss: issuer,
@@ -508,6 +627,7 @@ function createOidcProvider(opts: OidcOptions): OidcProvider {
       );
       await redis.sadd(RTCHAIN_PREFIX + chain, rh);
       await redis.expire(RTCHAIN_PREFIX + chain, REFRESH_TTL);
+      await registerSidToken(sid, rh);
       out.refresh_token = refreshToken;
     }
     return out;
@@ -936,9 +1056,15 @@ function createOidcProvider(opts: OidcOptions): OidcProvider {
       }
     }
 
-    // 撤销当前 SSO 会话（同时清掉来源会话的反向索引）
+    // 撤销当前 SSO 会话（同时清掉来源会话的反向索引），并整体撤销本次登录(sid)的令牌。
+    // 先反查 sid 再撤销：revokeSsoForToken 会删掉 SSO 记录，之后便取不到 sid。
     if (cookieToken) {
+      const login = await sidForToken(cookieToken);
       await revokeSsoForToken(cookieToken);
+      if (login) {
+        await revokeSid(login.sid);
+        void notifyBackchannel(login.sid, subject);
+      }
     }
     clearSsoCookie(res, hintDomain);
 
@@ -1007,6 +1133,10 @@ function createOidcProvider(opts: OidcOptions): OidcProvider {
     // 供 /api/verify 与 revokeSession 复用（SSO 令牌双向兼容 / 彻底撤销）
     verifySsoToken,
     revokeSsoForToken,
+    // 全局登出：按 sid 整体撤销 + 反查 token 的 sid + 向网关发 back-channel 通知
+    revokeSid,
+    sidForToken,
+    notifyBackchannel,
     // 供测试/诊断
     _internal: { exchangeCode, resolveSession, validateToken, issueTokens },
   };

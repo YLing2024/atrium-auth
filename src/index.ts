@@ -40,6 +40,10 @@ const REDIS_PORT = Number(process.env.REDIS_PORT || 6379);
 const REDIS_DB = Number(process.env.REDIS_DB || 0);
 // OIDC issuer：一律取环境变量 ISSUER，默认本机 3200（不得硬编码真实域名）
 const OIDC_ISSUER = process.env.ISSUER || 'http://127.0.0.1:3200';
+// 全局登出 back-channel：网关 loopback 端点地址（默认本机网关 18920），
+// 撤销后异步通知网关让该 sid 下的会话全部失效。不得硬编码真实域名。
+const GATEWAY_BACKCHANNEL_URL =
+  process.env.GATEWAY_BACKCHANNEL_URL || 'http://127.0.0.1:18920/_auth/backchannel-logout';
 
 // 登录页 ?redirect= 跨域回跳白名单：逗号分隔的域名根（示例：example.com,example.org）。
 // 语义与旧前端正则一致——只有这些根域及其子域允许作为跨域回跳目标。
@@ -316,12 +320,18 @@ async function registerSessionMeta(token: string, req: Request): Promise<void> {
 
 // 撤销单个会话：删 token + 移出索引 + 删元数据（logout / 设备删除 / 同设备去重共用）。
 // 同时彻底撤销关联的首方 SSO 令牌（共享 cookie）：登出后 cookie 不许再用满 TTL。
-async function revokeSession(token: string): Promise<void> {
+// 并按 sid 整体撤销「本次登录签发的全部令牌」；返回该会话的 {sid, sub}（查不到则 null），
+// 供调用方决定是否再发 back-channel 通知。
+async function revokeSession(token: string): Promise<{ sid: string; sub: string } | null> {
+  // oidc 在下方才创建；此处运行期取值，避免初始化顺序问题。
+  // sid 必须在撤销 SSO 之前反查（撤销会删掉 SSO 记录）。
+  const login = oidc && oidc.sidForToken ? await oidc.sidForToken(token) : null;
   await redis.del(token);
   await redis.srem(SESSION_INDEX_KEY, token);
   await redis.del(sessionHashKey(token));
-  // oidc 在下方才创建；此处运行期取值，避免初始化顺序问题
   if (oidc && oidc.revokeSsoForToken) await oidc.revokeSsoForToken(token);
+  if (login && oidc && oidc.revokeSid) await oidc.revokeSid(login.sid);
+  return login;
 }
 
 // 设备指纹去重：登录成功后仅保留最新一次会话。
@@ -656,7 +666,9 @@ app.post('/api/logout', async (req, res) => {
   }
   try {
     if (token) {
-      await revokeSession(token); // 删 token + 移出索引 + 删元数据
+      const login = await revokeSession(token); // 删 token + 移出索引 + 删元数据 + 按 sid 整体撤销
+      // 完成本地撤销后异步通知网关：该 sid 下的网关会话全部失效（失败只记日志，不影响响应）
+      if (login && oidc && oidc.notifyBackchannel) void oidc.notifyBackchannel(login.sid, SSO_SUBJECT);
     }
     return res.json({ ok: true, message: 'Session revoked' });
   } catch (err) {
@@ -988,6 +1000,8 @@ const oidc: OidcProvider = createOidcProvider({
   legacySubjects: [...LEGACY_SUBJECTS],
   loginPagePath: path.join(__dirname, '..', 'public', 'index.html'),
   sessionTtl: SESSION_TTL,
+  backchannelUrl: GATEWAY_BACKCHANNEL_URL,
+  internalToken,
 });
 app.use(oidc.router);
 
