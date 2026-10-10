@@ -48,6 +48,18 @@ export default tseslint.config(
   },
   ...tseslint.configs.recommended,
   {
+    files: ['scripts/**/*.js'],
+    languageOptions: {
+      // 独立测试驱动脚本：CommonJS，零依赖，不在 tsconfig include 内。
+      sourceType: 'commonjs',
+      globals: { ...nodeGlobals },
+    },
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+    },
+  },
+  {
     files: ['src/**/*.ts', 'test/**/*.ts'],
     languageOptions: {
       // 本仓库是 CommonJS 单文件后端（零构建），require/module.exports 是既定形态

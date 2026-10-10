@@ -42,9 +42,6 @@ function check(name, cond) {
   }
 }
 
-function b64url(buf) {
-  return Buffer.from(buf).toString('base64url');
-}
 function jwtPayload(token) {
   return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
 }
