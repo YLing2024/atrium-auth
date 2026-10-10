@@ -44,6 +44,7 @@ A local Redis is required (default `127.0.0.1:6379`). On first start it generate
 | `INTERNAL_TOKEN` | none | Explicit internal token value, overriding the file |
 | `AUTH_GEOIP_URL` | `https://ip-api.com/json/{ip}?fields=status,country,regionName,city` | Login source resolution endpoint |
 | `ALLOWED_REDIRECT_ROOTS` | empty (same-origin only) | Domain roots allowed as cross-origin `?redirect=` targets on the login page, comma-separated (example `example.com,example.org`); only these roots and their subdomains may be used. When unset, only same-origin returns are allowed and cross-origin targets are rejected with a readable notice |
+| `GATEWAY_BACKCHANNEL_URL` | `http://127.0.0.1:18920/_auth/backchannel-logout` | Global-logout back channel: after revocation, asynchronously calls the gateway loopback endpoint so every gateway session under that sid is invalidated |
 
 ## Interfaces
 
@@ -73,7 +74,7 @@ OIDC (mounted at the root path, issuer from `ISSUER`):
 | GET/POST | `/userinfo` | Bearer access_token |
 | GET | `/jwks.json` | ES256 public key set |
 | POST/GET | `/introspect` | RFC 7662 |
-| GET/POST | `/end_session` | RP-Initiated Logout (return whitelist) |
+| GET/POST | `/end_session` | RP-Initiated Logout (return whitelist); revokes all tokens under that sid and asynchronously calls the gateway back channel |
 | POST | `/revoke` | RFC 7009 |
 | GET | `/auth` | login page (`?redirect=` legacy flow + whitelist) |
 

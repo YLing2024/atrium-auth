@@ -44,6 +44,7 @@ npm run check        # = typecheck（tsc --noEmit）+ lint + test
 | `INTERNAL_TOKEN` | 无 | 直接指定内部令牌值，覆盖文件 |
 | `AUTH_GEOIP_URL` | `https://ip-api.com/json/{ip}?fields=status,country,regionName,city` | 登录来源解析接口 |
 | `ALLOWED_REDIRECT_ROOTS` | 空（仅同源） | 登录页 `?redirect=` 允许跨域回跳的域名根，逗号分隔（示例 `example.com,example.org`）；只有这些根域及其子域可回跳，未配置时仅同源、拒绝跨域并提示 |
+| `GATEWAY_BACKCHANNEL_URL` | `http://127.0.0.1:18920/_auth/backchannel-logout` | 全局登出 back-channel：撤销后异步回调网关 loopback 端点，让该 sid 下的网关会话全部失效 |
 
 ## 接口
 
@@ -73,7 +74,7 @@ OIDC（挂在根路径，issuer 取 `ISSUER`）：
 | GET/POST | `/userinfo` | Bearer access_token |
 | GET | `/jwks.json` | ES256 公钥集 |
 | POST/GET | `/introspect` | RFC 7662 |
-| GET/POST | `/end_session` | RP-Initiated Logout（回跳白名单） |
+| GET/POST | `/end_session` | RP-Initiated Logout（回跳白名单）；撤销该 sid 下全部令牌并异步回传网关 back-channel |
 | POST | `/revoke` | RFC 7009 |
 | GET | `/auth` | 登录页（`?redirect=` 旧流程 + 白名单） |
 
