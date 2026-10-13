@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   ConfigProvider,
+  Form,
   Input,
   Steps,
   Typography,
@@ -132,60 +133,36 @@ function LoginPage() {
               flex: 'none',
             }}
           />
-          <Typography.Title
-            level={4}
-            style={{
-              margin: 0,
-              fontSize: 20,
-              fontWeight: 600,
-              letterSpacing: '0.02em',
-              textTransform: 'uppercase',
-            }}
-          >
+          <Typography.Title level={4} style={{ margin: 0 }}>
             HomeAuth
           </Typography.Title>
         </div>
-        <div
-          style={{
-            fontSize: 10,
-            color: token.colorTextSecondary,
-            textTransform: 'uppercase',
-            letterSpacing: '0.18em',
-            marginBottom: 44,
-          }}
-        >
+        <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 44 }}>
           Single Sign-On
-        </div>
+        </Typography.Text>
 
-        <label
+        <Form.Item
+          label="Authenticator Code"
           htmlFor="code"
-          style={{
-            display: 'block',
-            fontSize: 10,
-            fontWeight: 600,
-            letterSpacing: '0.16em',
-            textTransform: 'uppercase',
-            color: token.colorTextSecondary,
-            marginBottom: 10,
-          }}
+          layout="vertical"
+          style={{ marginBottom: 0 }}
         >
-          Authenticator Code
-        </label>
-        <Input.Password
-          id="code"
-          ref={inputRef}
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          onPressEnter={login}
-          inputMode="numeric"
-          maxLength={6}
-          autoComplete="one-time-code"
-          autoFocus
-          size="large"
-          placeholder="······"
-          visibilityToggle={{ visible: showCode, onVisibleChange }}
-          style={{ fontSize: 24, letterSpacing: '0.4em', textAlign: 'center' }}
-        />
+          <Input.Password
+            id="code"
+            ref={inputRef}
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            onPressEnter={login}
+            inputMode="numeric"
+            maxLength={6}
+            autoComplete="one-time-code"
+            autoFocus
+            size="large"
+            placeholder="······"
+            visibilityToggle={{ visible: showCode, onVisibleChange }}
+            style={{ textAlign: 'center' }}
+          />
+        </Form.Item>
 
         {error ? (
           <Alert
@@ -202,7 +179,7 @@ function LoginPage() {
           block
           loading={loading}
           onClick={login}
-          style={{ marginTop: 32, height: 44, letterSpacing: '0.22em', textTransform: 'uppercase' }}
+          style={{ marginTop: 32, height: 44 }}
         >
           Login
         </Button>
@@ -246,18 +223,12 @@ function LoginPage() {
           </div>
         ) : null}
 
-        <div
-          style={{
-            marginTop: 36,
-            fontSize: 9,
-            color: token.colorTextSecondary,
-            letterSpacing: '0.2em',
-            textAlign: 'center',
-            textTransform: 'uppercase',
-          }}
+        <Typography.Text
+          type="secondary"
+          style={{ display: 'block', textAlign: 'center', marginTop: 36 }}
         >
-          HOME AUTH
-        </div>
+          Home Auth
+        </Typography.Text>
       </Card>
     </div>
   );
