@@ -21,14 +21,17 @@
 - Node 24 + Express 4，**CommonJS 单文件**
 - Redis（`127.0.0.1:6379`）—— 会话唯一存储
 - `lib/totp-auth/`：零依赖自研模块，**保持 JS 不迁移**（被 admin-server 以 `file:` 依赖共用）：`index.js` 工厂 + `lib/totp.js` / `lib/rate-limit.js` / `lib/jwt.js`，另配手写 `index.d.ts` / `lib/totp.d.ts` / `lib/rate-limit.d.ts` 供 TS 侧引用
-- 无数据库、无构建步骤
+- 无数据库；**后端零构建**（Node 直跑 `.ts`）
+- 登录页前端：`web/` 源码（React 18 + Vite 6 + **Ant Design 5**），`npm run web:build` 构建到 `public/`（产物入库）。
+  **前端设计语言一律用 Ant Design**：组件用 antd，主题令牌映射到本项目既有配色（浅色 `#a05b0c`/`#f7f6f3`、深色 `#c77c1f`/`#13110f`；圆角一律 0、`controlHeight 32`、系统无衬线栈、深浅色跟随 `prefers-color-scheme`），
+  令牌见 `web/src/App.tsx` 的 `LIGHT_TOKENS` / `DARK_TOKENS`。回跳白名单 / token 走 query / 设备名 / 错误文案等安全语义与旧静态页**逐条等价**（见 `web/src/auth-logic.ts`）。
 
 > `lib/totp-auth` 同时以软链方式暴露给 `../admin-server`（`file:../totp-auth`）。**改这个目录会同时影响认证中心和 admin-server**，改前全局搜引用。
 
 ## 目录结构
 
 ```
-src/index.ts          # 登录页 + 全部路由（单文件）
+src/index.ts          # 全部路由（/auth 返回 public/index.html 登录页）；CJS 单文件
 src/oidc/             # OIDC Provider：discovery/authorize/token/userinfo/jwks/introspect/end_session/revoke
 ├── index.ts          # createOidcProvider() 工厂（挂到 app 根路径）
 ├── keys.ts           # ES256 密钥库（oidc-keys.json / JWKS / kid=thumbprint）
@@ -37,7 +40,13 @@ src/oidc/             # OIDC Provider：discovery/authorize/token/userinfo/jwks/
 lib/totp-auth/        # TOTP 模块：生成/验证/限速/JWT
 ├── index.js          # createTotpAuth() 工厂（含 auth.router 内置路由）
 └── lib/{totp,rate-limit,jwt}.js
-public/index.html     # 登录页静态资源
+web/                  # 登录页前端源码（React + Vite + Ant Design）
+├── src/App.tsx       # 页面组件（antd 组件 + 主题令牌 LIGHT_TOKENS/DARK_TOKENS）
+├── src/auth-logic.ts # 回跳白名单 / 设备名（纯逻辑，与旧内联脚本逐条等价）
+├── src/main.tsx      # 入口
+├── index.html        # 保留运行期 <script src="/config.js">
+└── vite.config.ts    # 构建到 ../public（base '/'、emptyOutDir）
+public/               # 登录页构建产物（入库）：index.html + assets/*
 clients.json          # OIDC 客户端注册表（本地，不入库）
 clients.example.json  # 注册表占位示例（入库）
 oidc-keys.json        # OIDC ES256 私钥（本地，不入库）
@@ -51,11 +60,15 @@ jwt-secret            # JWT 密钥（本地，不入库）
 ```bash
 npm install
 node src/index.ts           # 监听 3200
+npm run web:install         # 前端依赖（web/）
+npm run web:build           # 构建登录页 → public/（产物入库）
+npm run check               # 后端：typecheck + lint + test
 systemctl restart auth-server
 journalctl -u auth-server -n 100 --no-pager
 ```
 
-无测试、无 lint、无构建。
+后端零构建（Node 直跑 `.ts`）；登录页前端有 Vite 构建步骤（`web/` → `public/`），产物随源码入库，部署即静态文件。
+`public/` 由部署期 nginx 直接伺服（auth-server 本身是纯 API，无静态中间件），构建后重启 `auth-server` 不是必需，但改动 `src/**` 必须重启。
 
 ## 接口
 
