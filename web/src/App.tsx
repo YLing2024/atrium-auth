@@ -13,9 +13,6 @@ import type { InputRef, ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { deviceName, resolveRedirect } from './auth-logic';
 
-const FONT_FAMILY =
-  '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif';
-
 // 回跳目标与是否被拒（页面加载时解析一次）
 const { redirect: REDIRECT, rejected: REDIRECT_REJECTED } = resolveRedirect();
 
@@ -24,47 +21,6 @@ function redirectWithToken(token: string): void {
   const sep = REDIRECT.indexOf('?') === -1 ? '?' : '&';
   window.location.href = REDIRECT + sep + 'token=' + encodeURIComponent(token);
 }
-
-/* ------------------------------------------------------------------ *
- * 主题令牌（antd token 映射；圆角一律 0）
- * ------------------------------------------------------------------ */
-
-const SHARED_TOKENS: ThemeConfig['token'] = {
-  borderRadius: 0,
-  borderRadiusLG: 0,
-  borderRadiusSM: 0,
-  borderRadiusXS: 0,
-  controlHeight: 32,
-  motionDurationFast: '0.1s',
-  motionDurationMid: '0.15s',
-  motionDurationSlow: '0.15s',
-  wireframe: false,
-  fontFamily: FONT_FAMILY,
-};
-
-const LIGHT_TOKENS: ThemeConfig['token'] = {
-  ...SHARED_TOKENS,
-  colorPrimary: '#a05b0c',
-  colorBgBase: '#f7f6f3',
-  colorBgLayout: '#f7f6f3',
-  colorBgContainer: '#fbfaf8',
-  colorText: '#171512',
-  colorTextSecondary: '#6f6a63',
-  colorBorder: 'rgba(23,21,18,0.16)',
-  colorBorderSecondary: 'rgba(23,21,18,0.16)',
-};
-
-const DARK_TOKENS: ThemeConfig['token'] = {
-  ...SHARED_TOKENS,
-  colorPrimary: '#c77c1f',
-  colorBgBase: '#13110f',
-  colorBgLayout: '#13110f',
-  colorBgContainer: '#191715',
-  colorText: '#efeae3',
-  colorTextSecondary: '#a29b92',
-  colorBorder: 'rgba(239,234,227,0.16)',
-  colorBorderSecondary: 'rgba(239,234,227,0.16)',
-};
 
 function usePrefersDark(): boolean {
   const [dark, setDark] = useState<boolean>(() =>
@@ -309,11 +265,10 @@ function LoginPage() {
 
 export default function App() {
   const dark = usePrefersDark();
+  // 一律使用 Ant Design 默认设计语言：只切算法，不覆盖任何自定义 token
   const themeConfig = useMemo<ThemeConfig>(
     () => ({
-      cssVar: true,
       algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
-      token: dark ? DARK_TOKENS : LIGHT_TOKENS,
     }),
     [dark]
   );
