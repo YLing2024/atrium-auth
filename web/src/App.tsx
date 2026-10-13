@@ -7,6 +7,7 @@ import {
   ConfigProvider,
   Form,
   Input,
+  Segmented,
   Steps,
   Typography,
   theme,
@@ -14,6 +15,14 @@ import {
 import type { ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { deviceName, resolveRedirect } from './auth-logic';
+import {
+  applyTheme,
+  resolveTheme,
+  setThemeMode,
+  useSystemDark,
+  useThemeMode,
+} from './theme';
+import type { ThemeMode } from './theme';
 
 // 回跳目标与是否被拒（页面加载时解析一次）
 const { redirect: REDIRECT, rejected: REDIRECT_REJECTED } = resolveRedirect();
@@ -24,21 +33,6 @@ function redirectWithToken(token: string): void {
   window.location.href = REDIRECT + sep + 'token=' + encodeURIComponent(token);
 }
 
-function usePrefersDark(): boolean {
-  const [dark, setDark] = useState<boolean>(() =>
-    typeof window !== 'undefined' && window.matchMedia
-      ? window.matchMedia('(prefers-color-scheme: dark)').matches
-      : false
-  );
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const onChange = (e: MediaQueryListEvent) => setDark(e.matches);
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  }, []);
-  return dark;
-}
-
 /* ------------------------------------------------------------------ *
  * 登录页
  * ------------------------------------------------------------------ */
@@ -46,7 +40,7 @@ function usePrefersDark(): boolean {
 type LoginData = { token?: string; code?: string; retryAfter?: number; message?: string };
 type SetupData = { secret?: string; otpauthUri?: string; message?: string };
 
-function LoginPage() {
+function LoginPage({ mode }: { mode: ThemeMode }) {
   const { token } = theme.useToken();
   const inputRef = useRef<ComponentRef<typeof Input.OTP>>(null);
   const [code, setCode] = useState('');
@@ -122,19 +116,32 @@ function LoginPage() {
       style={{ background: token.colorBgLayout, color: token.colorText }}
     >
       <Card className="auth-card" bordered>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-          <span
-            style={{
-              width: 10,
-              height: 10,
-              background: token.colorPrimary,
-              transform: 'rotate(45deg)',
-              flex: 'none',
-            }}
+        <div className="auth-head">
+          <div className="auth-brand">
+            <span
+              style={{
+                width: 10,
+                height: 10,
+                background: token.colorPrimary,
+                transform: 'rotate(45deg)',
+                flex: 'none',
+              }}
+            />
+            <Typography.Title level={4} style={{ margin: 0 }}>
+              HomeAuth
+            </Typography.Title>
+          </div>
+          <Segmented
+            className="auth-theme"
+            size="small"
+            value={mode}
+            onChange={(value) => setThemeMode(value as ThemeMode)}
+            options={[
+              { label: '自动', value: 'auto' },
+              { label: '亮色', value: 'light' },
+              { label: '暗色', value: 'dark' },
+            ]}
           />
-          <Typography.Title level={4} style={{ margin: 0 }}>
-            HomeAuth
-          </Typography.Title>
         </div>
         <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 44 }}>
           Single Sign-On
@@ -236,18 +243,26 @@ function LoginPage() {
 }
 
 export default function App() {
-  const dark = usePrefersDark();
+  const mode = useThemeMode();
+  const systemDark = useSystemDark();
+  const resolved = resolveTheme(mode, systemDark);
+
+  // 首屏由 index.html 内联脚本先打 data-theme；这里在 React 侧保持同步（含 auto 跟随系统）
+  useEffect(() => {
+    applyTheme(resolved);
+  }, [resolved]);
+
   // 一律使用 Ant Design 默认设计语言：只切算法，不覆盖任何自定义 token
   const themeConfig = useMemo<ThemeConfig>(
     () => ({
-      algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
+      algorithm: resolved === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm,
     }),
-    [dark]
+    [resolved]
   );
 
   return (
     <ConfigProvider locale={zhCN} theme={themeConfig}>
-      <LoginPage />
+      <LoginPage mode={mode} />
     </ConfigProvider>
   );
 }
