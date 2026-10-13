@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ComponentRef } from 'react';
 import {
   Alert,
   Button,
@@ -10,7 +11,7 @@ import {
   Typography,
   theme,
 } from 'antd';
-import type { InputRef, ThemeConfig } from 'antd';
+import type { ThemeConfig } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { deviceName, resolveRedirect } from './auth-logic';
 
@@ -47,18 +48,21 @@ type SetupData = { secret?: string; otpauthUri?: string; message?: string };
 
 function LoginPage() {
   const { token } = theme.useToken();
-  const inputRef = useRef<InputRef>(null);
+  const inputRef = useRef<ComponentRef<typeof Input.OTP>>(null);
   const [code, setCode] = useState('');
-  const [showCode, setShowCode] = useState(false);
+  const [otpKey, setOtpKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(
     REDIRECT_REJECTED ? '回跳地址不在允许范围内，登录后将留在本站' : ''
   );
   const [setup, setSetup] = useState<{ secret: string; otpauthUri?: string } | null>(null);
 
+  // 自动聚焦第一格：挂载后、以及每次提交结束（loading 落回 false / 重挂载清空）后重新聚焦
   useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+    if (!loading) {
+      inputRef.current?.focus();
+    }
+  }, [loading, otpKey]);
 
   async function setupInit(): Promise<void> {
     try {
@@ -108,13 +112,8 @@ function LoginPage() {
     } finally {
       setLoading(false);
       setCode('');
-      inputRef.current?.focus();
+      setOtpKey((k) => k + 1);
     }
-  }
-
-  function onVisibleChange(visible: boolean): void {
-    setShowCode(visible);
-    inputRef.current?.focus();
   }
 
   return (
@@ -143,24 +142,26 @@ function LoginPage() {
 
         <Form.Item
           label="Authenticator Code"
-          htmlFor="code"
           layout="vertical"
           style={{ marginBottom: 0 }}
         >
-          <Input.Password
-            id="code"
+          <Input.OTP
+            key={otpKey}
             ref={inputRef}
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-            onPressEnter={login}
+            // 空格是 OTP 内部空格的占位符，formatter 必须保留它，否则中间格的编辑位置会被压掉
+            formatter={(value) => value.replace(/[^\d ]/g, '')}
+            // onInput 每格变化都给 cells（onChange 只在填满时触发），用它同步 code 以支持回车校验
+            onInput={(cells) => setCode(cells.join('').replace(/\s/g, ''))}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                login();
+              }
+            }}
+            length={6}
             inputMode="numeric"
-            maxLength={6}
-            autoComplete="one-time-code"
+            disabled={loading}
             autoFocus
             size="large"
-            placeholder="······"
-            visibilityToggle={{ visible: showCode, onVisibleChange }}
-            style={{ textAlign: 'center' }}
           />
         </Form.Item>
 
