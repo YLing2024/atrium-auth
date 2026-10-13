@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HomeAuth</title>
+    <!-- 运行期配置：仅回跳白名单域名根，由后端 GET /config.js 注入，构建期不打包 -->
+    <script src="/config.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

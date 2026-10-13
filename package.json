@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "node --test",
-    "check": "npm run typecheck && npm run lint && npm test"
+    "check": "npm run typecheck && npm run lint && npm test",
+    "web:install": "npm --prefix web install",
+    "web:build": "npm --prefix web run build"
   },
   "dependencies": {
     "express": "^4.19.2",
