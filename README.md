@@ -1,3 +1,7 @@
+> **本项目已停止维护（2026-10-16）**：自托管认证中心（TOTP + OIDC 单点登录） —— 已用 Go 重写并迁移到
+> [YLing2024/auth-server-go](https://github.com/YLing2024/auth-server-go)。
+> 新版为单二进制、仅 MySQL、HTTP 只用标准库，并提供 SQLite → MySQL 迁移工具。
+> 本仓库仅作历史留存，不再修复或更新；生产环境已切换到新仓库。
 [简体中文](README.md) ｜ [English](README.en.md)
 
 # atrium-auth
